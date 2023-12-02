@@ -1,0 +1,11 @@
+[package]
+name = "bevy-jam-04"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.12.1"
+bevy-inspector-egui = "0.21.0"
+bevy_wasm_window_resize = "0.2.1"
+bevy_asset_loader = "0.18.0"
+iyes_progress = "0.10.0"
