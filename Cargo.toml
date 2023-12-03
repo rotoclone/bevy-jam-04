@@ -10,6 +10,5 @@ bevy_wasm_window_resize = "0.2.1"
 bevy_asset_loader = { version = "0.18.0", features = ["progress_tracking"] }
 iyes_progress = "0.10.0"
 bevy_rapier2d = { version = "0.23.0", features = ["debug-render-2d"] }
-instant = { version = "0.1.12", features = ["wasm-bindgen"] }
 bevy_tweening = "0.9.0"
 rand = "0.8.5"

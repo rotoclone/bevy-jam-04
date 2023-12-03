@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use bevy::{
     audio::{Volume, VolumeLevel},
+    input::common_conditions::input_just_pressed,
     sprite::MaterialMesh2dBundle,
 };
 use bevy_asset_loader::{
@@ -23,10 +26,13 @@ const PLAYER_DAMPING: f32 = 12.0;
 const PLAYER_MASS: f32 = 100.0;
 const PLAYER_INERTIA: f32 = 16000.0;
 
+const PLAYER_ATTACK_COOLDOWN: Duration = Duration::from_millis(1000);
+
 const MOVE_LEFT_KEY: KeyCode = KeyCode::A;
 const MOVE_RIGHT_KEY: KeyCode = KeyCode::D;
 const MOVE_UP_KEY: KeyCode = KeyCode::W;
 const MOVE_DOWN_KEY: KeyCode = KeyCode::S;
+const ATTACK_INPUT: MouseButton = MouseButton::Left;
 
 const BG_MUSIC_VOLUME: f32 = 0.5;
 
@@ -61,7 +67,14 @@ impl Plugin for GamePlugin {
             ),
         );
 
-        app.add_systems(Update, player_movement);
+        app.add_systems(
+            Update,
+            (
+                update_attack_cooldown,
+                player_movement,
+                player_attack.run_if(input_just_pressed(ATTACK_INPUT)),
+            ),
+        );
     }
 }
 
@@ -95,6 +108,9 @@ struct BackgroundMusic;
 
 #[derive(Component)]
 struct Player;
+
+#[derive(Component)]
+struct AttackCooldown(Timer);
 
 /// Sets up the loading screen.
 fn loading_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -141,6 +157,9 @@ fn game_setup(
     mut materials: ResMut<Assets<ColorMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
+    let mut attack_cooldown = AttackCooldown(Timer::new(PLAYER_ATTACK_COOLDOWN, TimerMode::Once));
+    attack_cooldown.0.set_elapsed(PLAYER_ATTACK_COOLDOWN);
+
     commands
         .spawn(MaterialMesh2dBundle {
             mesh: meshes.add(shape::Circle::new(PLAYER_SIZE).into()).into(),
@@ -162,7 +181,15 @@ fn game_setup(
             ..default()
         })
         .insert(GravityScale(0.0))
-        .insert(Player);
+        .insert(Player)
+        .insert(attack_cooldown);
+}
+
+/// Updates remaining attack cooldowns
+fn update_attack_cooldown(mut query: Query<&mut AttackCooldown>, time: Res<Time>) {
+    for mut cooldown in query.iter_mut() {
+        cooldown.0.tick(time.delta());
+    }
 }
 
 /// Applies impulses to the player based on pressed keys
@@ -196,6 +223,20 @@ fn player_movement(
 
         // clamp speed
         velocity.linvel = velocity.linvel.clamp_length_max(PLAYER_MAX_SPEED);
+    }
+}
+
+/// Makes the player attack
+fn player_attack(mut player_query: Query<&mut AttackCooldown, With<Player>>) {
+    for mut cooldown in player_query.iter_mut() {
+        if !cooldown.0.finished() {
+            continue;
+        }
+
+        //TODO make the player actually attack
+        println!("attacking");
+
+        cooldown.0.reset();
     }
 }
 
