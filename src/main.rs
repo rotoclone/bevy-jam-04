@@ -5,6 +5,7 @@ use bevy::{
     window::{WindowResized, WindowResolution},
 };
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_rapier2d::plugin::{NoUserData, RapierConfiguration, RapierPhysicsPlugin};
 use bevy_wasm_window_resize::WindowResizePlugin;
 
 mod menu;
@@ -60,6 +61,11 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0))
+        .insert_resource(RapierConfiguration {
+            gravity: Vec2::ZERO,
+            ..default()
+        })
         .add_plugins(WindowResizePlugin)
         .add_state::<GameState>()
         .add_systems(Startup, setup)
