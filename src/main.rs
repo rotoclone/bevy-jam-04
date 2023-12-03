@@ -6,6 +6,7 @@ use bevy::{
 };
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_rapier2d::plugin::{NoUserData, RapierConfiguration, RapierPhysicsPlugin};
+use bevy_tweening::TweeningPlugin;
 use bevy_wasm_window_resize::WindowResizePlugin;
 
 mod menu;
@@ -67,6 +68,7 @@ fn main() {
             ..default()
         })
         .add_plugins(WindowResizePlugin)
+        .add_plugins(TweeningPlugin)
         .add_state::<GameState>()
         .add_systems(Startup, setup)
         .add_plugins((MenuPlugin, GamePlugin))
