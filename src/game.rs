@@ -108,6 +108,7 @@ impl Plugin for GamePlugin {
                 player_attack.run_if(input_just_pressed(ATTACK_INPUT)),
                 tween_completed,
                 move_camera.after(player_movement),
+                keep_player_in_bounds.after(player_movement),
             ),
         );
     }
@@ -388,6 +389,20 @@ fn player_movement(
     }
 }
 
+/// Prevents the player from leaving the play area by clamping its transform
+fn keep_player_in_bounds(mut player_query: Query<&mut Transform, With<Player>>) {
+    let max_x = PLAY_AREA_SIZE.x / 2.0 - PLAYER_SIZE / 2.0;
+    let min_x = -PLAY_AREA_SIZE.x / 2.0 + PLAYER_SIZE / 2.0;
+    let max_y = PLAY_AREA_SIZE.y / 2.0 - PLAYER_SIZE / 2.0;
+    let min_y = -PLAY_AREA_SIZE.y / 2.0 + PLAYER_SIZE / 2.0;
+    for mut transform in player_query.iter_mut() {
+        transform.translation = transform.translation.clamp(
+            Vec3::new(min_x, min_y, transform.translation.z),
+            Vec3::new(max_x, max_y, transform.translation.z),
+        );
+    }
+}
+
 /// Makes the player attack
 fn player_attack(
     mut player_query: Query<(&mut AttackCooldown, &mut Attacking), With<Player>>,
@@ -428,9 +443,10 @@ fn move_camera(
             let min_y = (-PLAY_AREA_SIZE.y / 2.0) + (projection.area.height() / 2.0);
             look_transform.eye.x = player_transform.translation.x.clamp(min_x, max_x);
             look_transform.eye.y = player_transform.translation.y.clamp(min_y, max_y);
-            look_transform.target = player_transform
-                .translation
-                .clamp(Vec3::new(min_x, min_y, 0.0), Vec3::new(max_x, max_y, 0.0));
+            look_transform.target = player_transform.translation.clamp(
+                Vec3::new(min_x, min_y, look_transform.target.z),
+                Vec3::new(max_x, max_y, look_transform.target.z),
+            );
         }
     }
 }
