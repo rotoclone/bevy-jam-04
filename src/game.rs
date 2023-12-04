@@ -1,9 +1,10 @@
-use std::time::Duration;
+use std::{f32::consts::PI, time::Duration};
 
 use bevy::{
     audio::{Volume, VolumeLevel},
     input::common_conditions::input_just_pressed,
     sprite::MaterialMesh2dBundle,
+    transform,
 };
 use bevy_asset_loader::{
     asset_collection::AssetCollection,
@@ -14,8 +15,8 @@ use bevy_rapier2d::dynamics::{
     MassProperties, RigidBody, Velocity,
 };
 use bevy_tweening::{
-    lens::{TransformPositionLens, TransformRotateZLens},
-    Animator, AnimatorState, Delay, EaseFunction, Sequence, Tracks, Tween, TweenCompleted,
+    lens::{TransformPositionLens, TransformRotateZLens, TransformScaleLens},
+    Animator, AnimatorState, Delay, EaseFunction, Tracks, Tween, TweenCompleted,
 };
 use iyes_progress::{ProgressCounter, ProgressPlugin};
 
@@ -37,10 +38,28 @@ const PLAYER_ATTACK_COOLDOWN: Duration = Duration::from_millis(1000);
 const SWORD_SWING_ROTATION_DEGREES: f32 = 60.0;
 const SWORD_SWING_TRANSLATION: f32 = 2.0;
 
-const SWORD_ANIMATION_TIME: Duration = Duration::from_millis(150);
-const SWORD_ANIMATION_END_DELAY: Duration = Duration::from_millis(150);
+const SWORD_ANIMATION_TIME: Duration = Duration::from_millis(100);
+const SWORD_ANIMATION_END_DELAY: Duration = Duration::from_millis(100);
+const SWORD_TAKE_OUT_TIME: Duration = Duration::from_millis(1);
+const SWORD_PUT_AWAY_TIME: Duration = Duration::from_millis(150);
+
+const SWORD_START_SCALE: Vec3 = Vec3::new(1.0, 0.0, 1.0);
+const SWORD_END_SCALE: Vec3 = Vec3::ONE;
+// manually converting degrees to radians because `f32::to_radians` isn't `const` for some reason
+const SWORD_START_ROTATION: f32 = (SWORD_SWING_ROTATION_DEGREES / 2.0) * (PI / 180.0f32);
+const SWORD_END_ROTATION: f32 = (-SWORD_SWING_ROTATION_DEGREES / 2.0) * (PI / 180.0f32);
+const SWORD_START_TRANSLATION: Vec3 =
+    Vec3::new(-SWORD_SWING_TRANSLATION / 2.0, PLAYER_SIZE * 0.5, SWORD_Z);
+const SWORD_END_TRANSLATION: Vec3 =
+    Vec3::new(SWORD_SWING_TRANSLATION / 2.0, PLAYER_SIZE * 0.5, SWORD_Z);
 
 const SWORD_SWING_COMPLETE_EVENT_ID: u64 = 1;
+const ATTACK_DONE_EVENT_ID: u64 = 2;
+
+const SWORD_Z: f32 = -1.0;
+const BACKGROUND_Z: f32 = -100.0;
+
+const PLAY_AREA_SIZE: Vec2 = Vec2::new(1000.0, 1000.0);
 
 const MOVE_LEFT_KEY: KeyCode = KeyCode::A;
 const MOVE_RIGHT_KEY: KeyCode = KeyCode::D;
@@ -88,6 +107,7 @@ impl Plugin for GamePlugin {
                 player_movement,
                 player_attack.run_if(input_just_pressed(ATTACK_INPUT)),
                 tween_completed,
+                move_camera.after(player_movement),
             ),
         );
     }
@@ -95,10 +115,8 @@ impl Plugin for GamePlugin {
 
 #[derive(AssetCollection, Resource)]
 pub struct ImageAssets {
-    /* TODO
-    #[asset(path = "images/player.png")]
-    player: Handle<Image>,
-    */
+    #[asset(path = "images/bg.png")]
+    background: Handle<Image>,
 }
 
 #[derive(AssetCollection, Resource)]
@@ -129,6 +147,9 @@ struct AttackCooldown(Timer);
 
 #[derive(Component)]
 struct SwordPivot;
+
+#[derive(Component)]
+struct Attacking(bool);
 
 /// Sets up the loading screen.
 fn loading_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -173,32 +194,61 @@ fn game_setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    asset_server: Res<AssetServer>,
+    image_assets: Res<ImageAssets>,
 ) {
+    // background
+    commands.spawn(SpriteBundle {
+        sprite: Sprite {
+            custom_size: Some(PLAY_AREA_SIZE),
+            color: Color::WHITE.with_a(0.05),
+            ..default()
+        },
+        texture: image_assets.background.clone(),
+        transform: Transform::from_translation(Vec3::new(0.0, 0.0, BACKGROUND_Z)),
+        ..default()
+    });
+
     // player
     let mut attack_cooldown = AttackCooldown(Timer::new(PLAYER_ATTACK_COOLDOWN, TimerMode::Once));
     attack_cooldown.0.set_elapsed(PLAYER_ATTACK_COOLDOWN);
 
-    let sword_swing_tween = Sequence::new(vec![Tracks::new(vec![
+    let sword_swing_tween = Tween::new(
+        EaseFunction::QuadraticOut,
+        SWORD_TAKE_OUT_TIME,
+        TransformScaleLens {
+            start: SWORD_START_SCALE,
+            end: SWORD_END_SCALE,
+        },
+    )
+    .then(Tracks::new(vec![
         Tween::new(
             EaseFunction::QuadraticOut,
             SWORD_ANIMATION_TIME,
             TransformRotateZLens {
-                start: f32::to_radians(SWORD_SWING_ROTATION_DEGREES / 2.0),
-                end: -f32::to_radians(SWORD_SWING_ROTATION_DEGREES / 2.0),
+                start: SWORD_START_ROTATION,
+                end: SWORD_END_ROTATION,
             },
         ),
         Tween::new(
             EaseFunction::QuadraticOut,
             SWORD_ANIMATION_TIME,
             TransformPositionLens {
-                start: Vec3::new(-SWORD_SWING_TRANSLATION / 2.0, 0.0, 0.0),
-                end: Vec3::new(SWORD_SWING_TRANSLATION / 2.0, 0.0, 0.0),
+                start: SWORD_START_TRANSLATION,
+                end: SWORD_END_TRANSLATION,
             },
         ),
-    ])])
+    ]))
+    .then(Delay::new(SWORD_ANIMATION_END_DELAY).with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID))
     .then(
-        Delay::new(SWORD_ANIMATION_END_DELAY).with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID),
+        Tween::new(
+            EaseFunction::QuadraticIn,
+            SWORD_PUT_AWAY_TIME,
+            TransformScaleLens {
+                start: SWORD_END_SCALE,
+                end: SWORD_START_SCALE,
+            },
+        )
+        .with_completed_event(ATTACK_DONE_EVENT_ID),
     );
 
     commands
@@ -223,13 +273,16 @@ fn game_setup(
         })
         .insert(GravityScale(0.0))
         .insert(Player)
+        .insert(Attacking(false))
         .insert(attack_cooldown)
         .with_children(|parent| {
             // sword pivot
             parent
-                .spawn(SpatialBundle::from_transform(Transform::from_translation(
-                    Vec3::new(0.0, PLAYER_SIZE * 0.5, 0.0),
-                )))
+                .spawn(SpatialBundle::from_transform(
+                    Transform::from_translation(SWORD_START_TRANSLATION)
+                        .with_scale(SWORD_START_SCALE)
+                        .with_rotation(Quat::from_rotation_z(SWORD_START_ROTATION)),
+                ))
                 .insert(SwordPivot)
                 .insert(Animator::new(sword_swing_tween).with_state(AnimatorState::Paused))
                 .with_children(|pivot| {
@@ -238,7 +291,7 @@ fn game_setup(
                         mesh: meshes
                             .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
                             .into(),
-                        material: materials.add(ColorMaterial::from(Color::PURPLE)),
+                        material: materials.add(ColorMaterial::from(Color::GRAY)),
                         transform: Transform::from_translation(Vec3::new(
                             0.,
                             SWORD_LENGTH / 2.0,
@@ -254,11 +307,18 @@ fn game_setup(
 fn tween_completed(
     mut reader: EventReader<TweenCompleted>,
     mut sword_pivot_query: Query<&mut Visibility, With<SwordPivot>>,
+    mut player_attacking_query: Query<&mut Attacking, With<Player>>,
 ) {
     for ev in reader.read() {
         if ev.user_data == SWORD_SWING_COMPLETE_EVENT_ID {
             for mut visibility in sword_pivot_query.iter_mut() {
-                *visibility = Visibility::Hidden;
+                //TODO *visibility = Visibility::Hidden;
+            }
+        }
+
+        if ev.user_data == ATTACK_DONE_EVENT_ID {
+            for mut attacking in player_attacking_query.iter_mut() {
+                attacking.0 = false;
             }
         }
     }
@@ -273,7 +333,15 @@ fn update_attack_cooldown(mut query: Query<&mut AttackCooldown>, time: Res<Time>
 
 /// Applies impulses to the player based on pressed keys
 fn player_movement(
-    mut player_query: Query<(&mut ExternalForce, &mut Velocity, &mut Transform), With<Player>>,
+    mut player_query: Query<
+        (
+            &mut ExternalForce,
+            &mut Velocity,
+            &mut Transform,
+            &Attacking,
+        ),
+        With<Player>,
+    >,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     window_query: Query<&Window>,
     keycode: Res<Input<KeyCode>>,
@@ -289,7 +357,7 @@ fn player_movement(
         return;
     };
 
-    for (mut force, mut velocity, mut transform) in &mut player_query {
+    for (mut force, mut velocity, mut transform, attacking) in &mut player_query {
         // translation
         if keycode.pressed(MOVE_LEFT_KEY) {
             force.force.x = -PLAYER_MOVE_FORCE;
@@ -307,10 +375,13 @@ fn player_movement(
             force.force.y = 0.0;
         }
 
-        // rotation
-        let to_cursor = (cursor_world_position - transform.translation.xy()).normalize();
-        let rotate_to_cursor = Quat::from_rotation_arc(Vec3::Y, to_cursor.extend(0.));
-        transform.rotation = rotate_to_cursor;
+        // don't allow rotation while attacking because rapid spinning can increase the effective size of the sword swing
+        if !attacking.0 {
+            // rotation
+            let to_cursor = (cursor_world_position - transform.translation.xy()).normalize();
+            let rotate_to_cursor = Quat::from_rotation_arc(Vec3::Y, to_cursor.extend(0.));
+            transform.rotation = rotate_to_cursor;
+        }
 
         // clamp speed
         velocity.linvel = velocity.linvel.clamp_length_max(PLAYER_MAX_SPEED);
@@ -319,23 +390,48 @@ fn player_movement(
 
 /// Makes the player attack
 fn player_attack(
-    mut player_query: Query<&mut AttackCooldown, With<Player>>,
-    mut sword_query: Query<(&mut Animator<Transform>, &mut Visibility), With<SwordPivot>>,
+    mut player_query: Query<(&mut AttackCooldown, &mut Attacking), With<Player>>,
+    mut sword_query: Query<(&mut Animator<Transform>, &mut Transform), With<SwordPivot>>,
 ) {
-    for mut cooldown in player_query.iter_mut() {
+    for (mut cooldown, mut attacking) in player_query.iter_mut() {
         if !cooldown.0.finished() {
             continue;
         }
 
         //TODO only animate the sword for this particular player somehow
-        for (mut animator, mut visibility) in sword_query.iter_mut() {
+        for (mut animator, mut transform) in sword_query.iter_mut() {
             animator.stop();
-            animator.state = AnimatorState::Playing;
 
-            *visibility = Visibility::Inherited;
+            transform.scale = SWORD_START_SCALE;
+            transform.rotation.z = SWORD_START_ROTATION;
+            transform.translation = SWORD_START_TRANSLATION;
+
+            attacking.0 = true;
+
+            animator.state = AnimatorState::Playing;
         }
 
         cooldown.0.reset();
+    }
+}
+
+/// Moves the camera to follow the player
+fn move_camera(
+    mut camera_query: Query<(&mut LookTransform, &OrthographicProjection), With<MainCamera>>,
+    player_query: Query<&Transform, With<Player>>,
+) {
+    if let Ok(player_transform) = player_query.get_single() {
+        for (mut look_transform, projection) in camera_query.iter_mut() {
+            let max_x = (PLAY_AREA_SIZE.x / 2.0) - (projection.area.width() / 2.0);
+            let min_x = (-PLAY_AREA_SIZE.x / 2.0) + (projection.area.width() / 2.0);
+            let max_y = (PLAY_AREA_SIZE.y / 2.0) - (projection.area.height() / 2.0);
+            let min_y = (-PLAY_AREA_SIZE.y / 2.0) + (projection.area.height() / 2.0);
+            look_transform.eye.x = player_transform.translation.x.clamp(min_x, max_x);
+            look_transform.eye.y = player_transform.translation.y.clamp(min_y, max_y);
+            look_transform.target = player_transform
+                .translation
+                .clamp(Vec3::new(min_x, min_y, 0.0), Vec3::new(max_x, max_y, 0.0));
+        }
     }
 }
 

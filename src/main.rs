@@ -14,6 +14,7 @@ use menu::*;
 
 mod game;
 use game::*;
+use smooth_bevy_cameras::{LookTransform, LookTransformBundle, LookTransformPlugin, Smoother};
 
 const DEV_MODE: bool = false;
 
@@ -30,6 +31,7 @@ const TITLE_FONT: &str = "fonts/SofiaSans-Light.ttf";
 const MAIN_FONT: &str = "fonts/SofiaSans-Light.ttf";
 
 const MASTER_VOLUME: f32 = 0.5;
+const ZOOM_LEVEL: f32 = 0.33;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, States)]
 pub enum GameState {
@@ -42,6 +44,9 @@ pub enum GameState {
 #[derive(Component)]
 pub struct MainCamera;
 
+#[derive(Resource)]
+pub struct ZoomLevel(f32);
+
 #[derive(Component)]
 pub struct DisabledButton;
 
@@ -50,6 +55,7 @@ fn main() {
     app.insert_resource(ClearColor(Color::BLACK))
         .insert_resource(Msaa::Sample4)
         .insert_resource(GlobalVolume::new(MASTER_VOLUME))
+        .insert_resource(ZoomLevel(ZOOM_LEVEL))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "There's Too Many Of Them".into(),
@@ -69,6 +75,7 @@ fn main() {
         })
         .add_plugins(WindowResizePlugin)
         .add_plugins(TweeningPlugin)
+        .add_plugins(LookTransformPlugin)
         .add_state::<GameState>()
         .add_systems(Startup, setup)
         .add_plugins((MenuPlugin, GamePlugin))
@@ -87,18 +94,26 @@ fn main() {
 }
 
 fn setup(mut commands: Commands) {
-    commands.spawn(Camera2dBundle::default()).insert(MainCamera);
+    commands
+        .spawn(LookTransformBundle {
+            transform: LookTransform::new(Vec3::new(0.0, 0.0, 100.0), Vec3::ZERO, Vec3::Y),
+            smoother: Smoother::new(0.9),
+        })
+        .insert(Camera2dBundle::default())
+        .insert(MainCamera);
 }
 
 /// Adjusts the camera zoom when the window is resized
 fn zoom_based_on_window_size(
     mut camera_query: Query<&mut OrthographicProjection, With<MainCamera>>,
+    zoom_level: Res<ZoomLevel>,
     mut resize_reader: EventReader<WindowResized>,
 ) {
     let mut projection = camera_query.single_mut();
 
     for event in resize_reader.read() {
-        projection.scale = (WINDOW_WIDTH / event.width).max(WINDOW_HEIGHT / event.height);
+        projection.scale =
+            (WINDOW_WIDTH / event.width).max(WINDOW_HEIGHT / event.height) * zoom_level.0;
     }
 }
 
