@@ -2,6 +2,7 @@ use std::{f32::consts::PI, time::Duration};
 
 use bevy::{
     audio::{Volume, VolumeLevel},
+    ecs::query::{ReadOnlyWorldQuery, WorldQuery},
     input::common_conditions::input_just_pressed,
     sprite::MaterialMesh2dBundle,
     transform,
@@ -10,15 +11,20 @@ use bevy_asset_loader::{
     asset_collection::AssetCollection,
     loading_state::{LoadingState, LoadingStateAppExt},
 };
-use bevy_rapier2d::dynamics::{
-    AdditionalMassProperties, Damping, ExternalForce, ExternalImpulse, GravityScale,
-    MassProperties, RigidBody, Velocity,
+use bevy_rapier2d::{
+    dynamics::{
+        AdditionalMassProperties, Damping, ExternalForce, ExternalImpulse, GravityScale,
+        MassProperties, RigidBody, Velocity,
+    },
+    geometry::{ActiveEvents, Collider, Sensor},
+    pipeline::CollisionEvent,
 };
 use bevy_tweening::{
     lens::{TransformPositionLens, TransformRotateZLens, TransformScaleLens},
     Animator, AnimatorState, Delay, EaseFunction, Tracks, Tween, TweenCompleted,
 };
 use iyes_progress::{ProgressCounter, ProgressPlugin};
+use rand::Rng;
 
 use crate::*;
 
@@ -27,12 +33,21 @@ const LOADING_FONT: &str = "fonts/MajorMonoDisplay-Regular.ttf";
 const PLAYER_SIZE: f32 = 5.0;
 const PLAYER_MAX_SPEED: f32 = 70.0;
 const PLAYER_MOVE_FORCE: f32 = 100000.0;
-const PLAYER_DAMPING: f32 = 12.0;
+const PLAYER_DAMPING: f32 = 10.0;
 const PLAYER_MASS: f32 = 100.0;
 const PLAYER_INERTIA: f32 = 16000.0;
 
+const ENEMY_SIZE: f32 = 4.0;
+const ENEMY_MAX_SPEED: f32 = 40.0;
+const ENEMY_MOVE_FORCE: f32 = 75000.0;
+const ENEMY_DAMPING: f32 = 10.0;
+const ENEMY_MASS: f32 = 100.0;
+const ENEMY_INERTIA: f32 = 16000.0;
+
+const HIT_IMPULSE: f32 = 50000.0;
+
 const SWORD_WIDTH: f32 = 1.0;
-const SWORD_LENGTH: f32 = 12.0;
+const SWORD_LENGTH: f32 = 14.0;
 
 const PLAYER_ATTACK_COOLDOWN: Duration = Duration::from_millis(1000);
 const SWORD_SWING_ROTATION_DEGREES: f32 = 60.0;
@@ -60,6 +75,9 @@ const SWORD_Z: f32 = -1.0;
 const BACKGROUND_Z: f32 = -100.0;
 
 const PLAY_AREA_SIZE: Vec2 = Vec2::new(1000.0, 1000.0);
+const SPAWN_AREA_SIZE: Vec2 = Vec2::new(PLAY_AREA_SIZE.x + 40.0, PLAY_AREA_SIZE.y + 40.0);
+
+const START_SPAWN_INTERVAL: Duration = Duration::from_millis(2000);
 
 const MOVE_LEFT_KEY: KeyCode = KeyCode::A;
 const MOVE_RIGHT_KEY: KeyCode = KeyCode::D;
@@ -100,7 +118,12 @@ impl Plugin for GamePlugin {
             ),
         );
 
-        app.add_systems(
+        app.insert_resource(SpawnTimer(Timer::new(
+            START_SPAWN_INTERVAL,
+            TimerMode::Repeating,
+        )))
+        .insert_resource(EntitiesToDespawn(Vec::new()))
+        .add_systems(
             Update,
             (
                 update_attack_cooldown.before(player_attack),
@@ -109,8 +132,12 @@ impl Plugin for GamePlugin {
                 tween_completed,
                 move_camera.after(player_movement),
                 keep_player_in_bounds.after(player_movement),
+                spawn_enemies.run_if(in_state(GameState::Game)),
+                move_enemies,
+                collisions,
             ),
-        );
+        )
+        .add_systems(PostUpdate, despawn_entities);
     }
 }
 
@@ -127,6 +154,12 @@ pub struct AudioAssets {
     background_music: Handle<AudioSource>,
     */
 }
+
+#[derive(Resource)]
+struct SpawnTimer(Timer);
+
+#[derive(Resource)]
+struct EntitiesToDespawn(Vec<Entity>);
 
 #[derive(Component)]
 struct LoadingComponent;
@@ -150,7 +183,15 @@ struct AttackCooldown(Timer);
 struct SwordPivot;
 
 #[derive(Component)]
+struct Sword {
+    active: bool,
+}
+
+#[derive(Component)]
 struct Attacking(bool);
+
+#[derive(Component)]
+struct Enemy;
 
 /// Sets up the loading screen.
 fn loading_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -229,7 +270,8 @@ fn game_setup(
                 start: SWORD_START_ROTATION,
                 end: SWORD_END_ROTATION,
             },
-        ),
+        )
+        .with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID),
         Tween::new(
             EaseFunction::QuadraticOut,
             SWORD_ANIMATION_TIME,
@@ -239,7 +281,7 @@ fn game_setup(
             },
         ),
     ]))
-    .then(Delay::new(SWORD_ANIMATION_END_DELAY).with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID))
+    .then(Delay::new(SWORD_ANIMATION_END_DELAY))
     .then(
         Tween::new(
             EaseFunction::QuadraticIn,
@@ -259,6 +301,8 @@ fn game_setup(
             transform: Transform::from_translation(Vec3::new(0., 0., 0.)),
             ..default()
         })
+        .insert(Collider::ball(PLAYER_SIZE))
+        .insert(ActiveEvents::COLLISION_EVENTS)
         .insert(RigidBody::Dynamic)
         .insert(AdditionalMassProperties::MassProperties(MassProperties {
             mass: PLAYER_MASS,
@@ -288,18 +332,22 @@ fn game_setup(
                 .insert(Animator::new(sword_swing_tween).with_state(AnimatorState::Paused))
                 .with_children(|pivot| {
                     // sword
-                    pivot.spawn(MaterialMesh2dBundle {
-                        mesh: meshes
-                            .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
-                            .into(),
-                        material: materials.add(ColorMaterial::from(Color::GRAY)),
-                        transform: Transform::from_translation(Vec3::new(
-                            0.,
-                            SWORD_LENGTH / 2.0,
-                            0.,
-                        )),
-                        ..default()
-                    });
+                    pivot
+                        .spawn(MaterialMesh2dBundle {
+                            mesh: meshes
+                                .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
+                                .into(),
+                            material: materials.add(ColorMaterial::from(Color::GRAY)),
+                            transform: Transform::from_translation(Vec3::new(
+                                0.,
+                                SWORD_LENGTH / 2.0,
+                                0.,
+                            )),
+                            ..default()
+                        })
+                        .insert(Collider::cuboid(SWORD_WIDTH / 2.0, SWORD_LENGTH / 2.0))
+                        .insert(Sensor)
+                        .insert(Sword { active: false });
                 });
         });
 }
@@ -307,13 +355,13 @@ fn game_setup(
 /// Handles events for completed tweens
 fn tween_completed(
     mut reader: EventReader<TweenCompleted>,
-    mut sword_pivot_query: Query<&mut Visibility, With<SwordPivot>>,
+    mut sword_query: Query<&mut Sword>,
     mut player_attacking_query: Query<&mut Attacking, With<Player>>,
 ) {
     for ev in reader.read() {
         if ev.user_data == SWORD_SWING_COMPLETE_EVENT_ID {
-            for mut visibility in sword_pivot_query.iter_mut() {
-                //TODO *visibility = Visibility::Hidden;
+            for mut sword in sword_query.iter_mut() {
+                sword.active = false;
             }
         }
 
@@ -379,10 +427,16 @@ fn player_movement(
         // don't allow rotation while attacking because rapid spinning can increase the effective size of the sword swing
         if !attacking.0 {
             // rotation
-            let to_cursor = (cursor_world_position - transform.translation.xy()).normalize();
-            let rotate_to_cursor = Quat::from_rotation_arc(Vec3::Y, to_cursor.extend(0.));
-            transform.rotation = rotate_to_cursor;
+            if let Some(to_cursor) =
+                (cursor_world_position - transform.translation.xy()).try_normalize()
+            {
+                let rotate_to_cursor = Quat::from_rotation_arc(Vec3::Y, to_cursor.extend(0.));
+                transform.rotation = rotate_to_cursor;
+            }
         }
+
+        // prevent player from spinning around by itself
+        velocity.angvel = 0.0;
 
         // clamp speed
         velocity.linvel = velocity.linvel.clamp_length_max(PLAYER_MAX_SPEED);
@@ -406,7 +460,8 @@ fn keep_player_in_bounds(mut player_query: Query<&mut Transform, With<Player>>) 
 /// Makes the player attack
 fn player_attack(
     mut player_query: Query<(&mut AttackCooldown, &mut Attacking), With<Player>>,
-    mut sword_query: Query<(&mut Animator<Transform>, &mut Transform), With<SwordPivot>>,
+    mut sword_pivot_query: Query<(&mut Animator<Transform>, &mut Transform), With<SwordPivot>>,
+    mut sword_query: Query<&mut Sword>,
 ) {
     for (mut cooldown, mut attacking) in player_query.iter_mut() {
         if !cooldown.0.finished() {
@@ -414,7 +469,7 @@ fn player_attack(
         }
 
         //TODO only animate the sword for this particular player somehow
-        for (mut animator, mut transform) in sword_query.iter_mut() {
+        for (mut animator, mut transform) in sword_pivot_query.iter_mut() {
             animator.stop();
 
             transform.scale = SWORD_START_SCALE;
@@ -424,6 +479,10 @@ fn player_attack(
             attacking.0 = true;
 
             animator.state = AnimatorState::Playing;
+        }
+
+        for mut sword in sword_query.iter_mut() {
+            sword.active = true;
         }
 
         cooldown.0.reset();
@@ -448,6 +507,180 @@ fn move_camera(
                 Vec3::new(max_x, max_y, look_transform.target.z),
             );
         }
+    }
+}
+
+/// Handles spawning enemies
+fn spawn_enemies(
+    commands: Commands,
+    mut spawn_timer: ResMut<SpawnTimer>,
+    time: Res<Time>,
+    meshes: ResMut<Assets<Mesh>>,
+    materials: ResMut<Assets<ColorMaterial>>,
+) {
+    spawn_timer.0.tick(time.delta());
+
+    if spawn_timer.0.just_finished() {
+        println!("spawning an enemy"); //TODO
+        spawn_enemy(commands, meshes, materials);
+    }
+}
+
+/// Spawns an enemy at a random location
+fn spawn_enemy(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    // this assumes that the spawn area is larger than the play area
+    let min_x = PLAY_AREA_SIZE.x / 2.0;
+    let max_x = SPAWN_AREA_SIZE.x / 2.0;
+    let min_y = PLAY_AREA_SIZE.y / 2.0;
+    let max_y = SPAWN_AREA_SIZE.y / 2.0;
+
+    let mut rng = rand::thread_rng();
+    let mut x_coord = rng.gen_range(min_x..=max_x);
+    let mut y_coord = rng.gen_range(min_y..=max_y);
+
+    // randomly flip coordinate signs so enemies can spawn anywhere around the play area
+    if rng.gen::<bool>() {
+        x_coord *= -1.0;
+    }
+    if rng.gen::<bool>() {
+        y_coord *= -1.0;
+    }
+
+    commands
+        .spawn(MaterialMesh2dBundle {
+            mesh: meshes.add(shape::Circle::new(ENEMY_SIZE).into()).into(),
+            material: materials.add(ColorMaterial::from(Color::RED)),
+            transform: Transform::from_translation(Vec3::new(x_coord, y_coord, 0.)),
+            ..default()
+        })
+        .insert(Collider::ball(ENEMY_SIZE))
+        .insert(ActiveEvents::COLLISION_EVENTS)
+        .insert(RigidBody::Dynamic)
+        .insert(AdditionalMassProperties::MassProperties(MassProperties {
+            mass: ENEMY_MASS,
+            principal_inertia: ENEMY_INERTIA,
+            ..default()
+        }))
+        .insert(ExternalForce::default())
+        .insert(ExternalImpulse::default())
+        .insert(Velocity::default())
+        .insert(Damping {
+            linear_damping: ENEMY_DAMPING,
+            ..default()
+        })
+        .insert(GravityScale(0.0))
+        .insert(Enemy);
+}
+
+/// Handles moving enemies
+fn move_enemies(
+    mut enemy_query: Query<
+        (&mut ExternalForce, &mut Velocity, &mut Transform),
+        (With<Enemy>, Without<Player>),
+    >,
+    player_query: Query<&Transform, With<Player>>,
+) {
+    if let Ok(player_transform) = player_query.get_single() {
+        for (mut force, mut velocity, mut transform) in &mut enemy_query {
+            // push enemy in direction of player
+            let player_direction = player_transform.translation - transform.translation;
+            let movement_force = player_direction.clamp_length(ENEMY_MOVE_FORCE, ENEMY_MOVE_FORCE);
+            force.force = Vec2::new(movement_force.x, movement_force.y);
+
+            // rotate to face player
+            if let Some(to_player) = player_direction.try_normalize() {
+                let rotate_to_player = Quat::from_rotation_arc(Vec3::Y, to_player);
+                transform.rotation = rotate_to_player;
+            }
+
+            // prevent enemies from spinning around on their own
+            velocity.angvel = 0.0;
+
+            // clamp speed
+            velocity.linvel = velocity.linvel.clamp_length_max(ENEMY_MAX_SPEED);
+        }
+    }
+}
+
+/// Handles collisions between objects
+fn collisions(
+    mut collision_events: EventReader<CollisionEvent>,
+    mut entities_to_despawn: ResMut<EntitiesToDespawn>,
+    enemies_query: Query<(&Enemy, &Transform)>,
+    sword_query: Query<&Sword>,
+    mut player_query: Query<(&Player, &Transform, &mut ExternalImpulse)>,
+) {
+    for event in collision_events.read() {
+        if let CollisionEvent::Started(a, b, _) = event {
+            if let Some((enemy, enemy_entity)) =
+                get_from_either::<Enemy, (&Enemy, &Transform)>(*a, *b, &enemies_query)
+            {
+                // an enemy has hit something
+                if entities_to_despawn.0.contains(&enemy_entity) {
+                    // this enemy is going to be despawned, so don't mess with it any more
+                    continue;
+                }
+
+                if let Some((player, player_entity)) = get_from_either::<
+                    Player,
+                    (&Player, &Transform, &mut ExternalImpulse),
+                >(*a, *b, &player_query)
+                {
+                    // an enemy has hit the player
+                    if let Ok(player_transform) =
+                        player_query.get_component::<Transform>(player_entity)
+                    {
+                        if let Ok(enemy_transform) =
+                            enemies_query.get_component::<Transform>(enemy_entity)
+                        {
+                            // push the player back
+                            let enemy_to_player =
+                                player_transform.translation - enemy_transform.translation;
+                            let hit_force = enemy_to_player.clamp_length(HIT_IMPULSE, HIT_IMPULSE);
+                            if let Ok(mut impulse) =
+                                player_query.get_component_mut::<ExternalImpulse>(player_entity)
+                            {
+                                impulse.impulse = Vec2::new(hit_force.x, hit_force.y);
+                            }
+                        }
+                    }
+                } else if let Some((sword, sword_entity)) =
+                    get_from_either::<Sword, &Sword>(*a, *b, &sword_query)
+                {
+                    // an enemy has hit the sword
+                    if sword.active {
+                        entities_to_despawn.0.push(enemy_entity);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn get_from_either<'a, T: Component, Q: WorldQuery>(
+    a: Entity,
+    b: Entity,
+    query: &'a Query<Q>,
+) -> Option<(&'a T, Entity)> {
+    if let Ok(component) = query.get_component::<T>(a) {
+        return Some((component, a));
+    }
+
+    if let Ok(component) = query.get_component::<T>(b) {
+        return Some((component, b));
+    }
+
+    None
+}
+
+/// Despawns entities that need to be despawned
+fn despawn_entities(mut commands: Commands, mut entities_to_despawn: ResMut<EntitiesToDespawn>) {
+    for entity in entities_to_despawn.0.drain(0..) {
+        commands.entity(entity).despawn_recursive();
     }
 }
 
