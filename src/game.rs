@@ -24,7 +24,7 @@ use bevy_tweening::{
     Animator, AnimatorState, Delay, EaseFunction, Tracks, Tween, TweenCompleted,
 };
 use iyes_progress::{ProgressCounter, ProgressPlugin};
-use rand::Rng;
+use rand::{seq::SliceRandom, Rng};
 
 use crate::*;
 
@@ -53,7 +53,7 @@ const PLAYER_ATTACK_COOLDOWN: Duration = Duration::from_millis(1000);
 const SWORD_SWING_ROTATION_DEGREES: f32 = 60.0;
 const SWORD_SWING_TRANSLATION: f32 = 2.0;
 
-const SWORD_ANIMATION_TIME: Duration = Duration::from_millis(100);
+const SWORD_ANIMATION_TIME: Duration = Duration::from_millis(75);
 const SWORD_ANIMATION_END_DELAY: Duration = Duration::from_millis(100);
 const SWORD_TAKE_OUT_TIME: Duration = Duration::from_millis(1);
 const SWORD_PUT_AWAY_TIME: Duration = Duration::from_millis(150);
@@ -75,7 +75,9 @@ const SWORD_Z: f32 = -1.0;
 const BACKGROUND_Z: f32 = -100.0;
 
 const PLAY_AREA_SIZE: Vec2 = Vec2::new(1000.0, 1000.0);
-const SPAWN_AREA_SIZE: Vec2 = Vec2::new(PLAY_AREA_SIZE.x + 40.0, PLAY_AREA_SIZE.y + 40.0);
+
+const SPAWN_AREA_DEPTH: f32 = 25.0;
+const SPAWN_AREA_BUFFER: f32 = ENEMY_SIZE;
 
 const START_SPAWN_INTERVAL: Duration = Duration::from_millis(2000);
 
@@ -122,6 +124,7 @@ impl Plugin for GamePlugin {
             START_SPAWN_INTERVAL,
             TimerMode::Repeating,
         )))
+        .insert_resource(SpawnAreas(Vec::new()))
         .insert_resource(EntitiesToDespawn(Vec::new()))
         .add_systems(
             Update,
@@ -157,6 +160,9 @@ pub struct AudioAssets {
 
 #[derive(Resource)]
 struct SpawnTimer(Timer);
+
+#[derive(Resource)]
+struct SpawnAreas(Vec<Rect>);
 
 #[derive(Resource)]
 struct EntitiesToDespawn(Vec<Entity>);
@@ -237,6 +243,7 @@ fn game_setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     image_assets: Res<ImageAssets>,
+    mut spawn_areas: ResMut<SpawnAreas>,
 ) {
     // background
     commands.spawn(SpriteBundle {
@@ -249,6 +256,38 @@ fn game_setup(
         transform: Transform::from_translation(Vec3::new(0.0, 0.0, BACKGROUND_Z)),
         ..default()
     });
+
+    // spawn areas
+    spawn_areas.0 = vec![
+        // left
+        Rect::new(
+            (-PLAY_AREA_SIZE.x / 2.0) - (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
+            -PLAY_AREA_SIZE.y / 2.0,
+            (-PLAY_AREA_SIZE.x / 2.0) - SPAWN_AREA_BUFFER,
+            PLAY_AREA_SIZE.y / 2.0,
+        ),
+        // right
+        Rect::new(
+            (PLAY_AREA_SIZE.x / 2.0) + (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
+            -PLAY_AREA_SIZE.y / 2.0,
+            (PLAY_AREA_SIZE.x / 2.0) + SPAWN_AREA_BUFFER,
+            PLAY_AREA_SIZE.y / 2.0,
+        ),
+        // top
+        Rect::new(
+            -PLAY_AREA_SIZE.x / 2.0,
+            (PLAY_AREA_SIZE.y / 2.0) + (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
+            PLAY_AREA_SIZE.x / 2.0,
+            (PLAY_AREA_SIZE.y / 2.0) + SPAWN_AREA_BUFFER,
+        ),
+        // bottom
+        Rect::new(
+            -PLAY_AREA_SIZE.x / 2.0,
+            (-PLAY_AREA_SIZE.y / 2.0) - (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
+            PLAY_AREA_SIZE.x / 2.0,
+            (-PLAY_AREA_SIZE.y / 2.0) - SPAWN_AREA_BUFFER,
+        ),
+    ];
 
     // player
     let mut attack_cooldown = AttackCooldown(Timer::new(PLAYER_ATTACK_COOLDOWN, TimerMode::Once));
@@ -500,11 +539,34 @@ fn move_camera(
             let min_x = (-PLAY_AREA_SIZE.x / 2.0) + (projection.area.width() / 2.0);
             let max_y = (PLAY_AREA_SIZE.y / 2.0) - (projection.area.height() / 2.0);
             let min_y = (-PLAY_AREA_SIZE.y / 2.0) + (projection.area.height() / 2.0);
-            look_transform.eye.x = player_transform.translation.x.clamp(min_x, max_x);
-            look_transform.eye.y = player_transform.translation.y.clamp(min_y, max_y);
+
+            let target_min_x;
+            let target_max_x;
+            if min_x <= max_x {
+                look_transform.eye.x = player_transform.translation.x.clamp(min_x, max_x);
+                target_min_x = min_x;
+                target_max_x = max_x;
+            } else {
+                look_transform.eye.x = 0.0;
+                target_min_x = 0.0;
+                target_max_x = 0.0;
+            }
+
+            let target_min_y;
+            let target_max_y;
+            if min_y <= max_y {
+                look_transform.eye.y = player_transform.translation.y.clamp(min_y, max_y);
+                target_min_y = min_y;
+                target_max_y = max_y;
+            } else {
+                look_transform.eye.y = 0.0;
+                target_min_y = 0.0;
+                target_max_y = 0.0;
+            }
+
             look_transform.target = player_transform.translation.clamp(
-                Vec3::new(min_x, min_y, look_transform.target.z),
-                Vec3::new(max_x, max_y, look_transform.target.z),
+                Vec3::new(target_min_x, target_min_y, look_transform.target.z),
+                Vec3::new(target_max_x, target_max_y, look_transform.target.z),
             );
         }
     }
@@ -514,6 +576,7 @@ fn move_camera(
 fn spawn_enemies(
     commands: Commands,
     mut spawn_timer: ResMut<SpawnTimer>,
+    spawn_areas: Res<SpawnAreas>,
     time: Res<Time>,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<ColorMaterial>>,
@@ -521,59 +584,47 @@ fn spawn_enemies(
     spawn_timer.0.tick(time.delta());
 
     if spawn_timer.0.just_finished() {
-        println!("spawning an enemy"); //TODO
-        spawn_enemy(commands, meshes, materials);
+        spawn_enemy(commands, spawn_areas, meshes, materials);
     }
 }
 
 /// Spawns an enemy at a random location
 fn spawn_enemy(
     mut commands: Commands,
+    spawn_areas: Res<SpawnAreas>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    // this assumes that the spawn area is larger than the play area
-    let min_x = PLAY_AREA_SIZE.x / 2.0;
-    let max_x = SPAWN_AREA_SIZE.x / 2.0;
-    let min_y = PLAY_AREA_SIZE.y / 2.0;
-    let max_y = SPAWN_AREA_SIZE.y / 2.0;
-
     let mut rng = rand::thread_rng();
-    let mut x_coord = rng.gen_range(min_x..=max_x);
-    let mut y_coord = rng.gen_range(min_y..=max_y);
+    if let Some(spawn_area) = spawn_areas.0.choose(&mut rng) {
+        let x_coord = rng.gen_range(spawn_area.min.x..=spawn_area.max.x);
+        let y_coord = rng.gen_range(spawn_area.min.y..=spawn_area.max.y);
 
-    // randomly flip coordinate signs so enemies can spawn anywhere around the play area
-    if rng.gen::<bool>() {
-        x_coord *= -1.0;
+        commands
+            .spawn(MaterialMesh2dBundle {
+                mesh: meshes.add(shape::Circle::new(ENEMY_SIZE).into()).into(),
+                material: materials.add(ColorMaterial::from(Color::RED)),
+                transform: Transform::from_translation(Vec3::new(x_coord, y_coord, 0.)),
+                ..default()
+            })
+            .insert(Collider::ball(ENEMY_SIZE))
+            .insert(ActiveEvents::COLLISION_EVENTS)
+            .insert(RigidBody::Dynamic)
+            .insert(AdditionalMassProperties::MassProperties(MassProperties {
+                mass: ENEMY_MASS,
+                principal_inertia: ENEMY_INERTIA,
+                ..default()
+            }))
+            .insert(ExternalForce::default())
+            .insert(ExternalImpulse::default())
+            .insert(Velocity::default())
+            .insert(Damping {
+                linear_damping: ENEMY_DAMPING,
+                ..default()
+            })
+            .insert(GravityScale(0.0))
+            .insert(Enemy);
     }
-    if rng.gen::<bool>() {
-        y_coord *= -1.0;
-    }
-
-    commands
-        .spawn(MaterialMesh2dBundle {
-            mesh: meshes.add(shape::Circle::new(ENEMY_SIZE).into()).into(),
-            material: materials.add(ColorMaterial::from(Color::RED)),
-            transform: Transform::from_translation(Vec3::new(x_coord, y_coord, 0.)),
-            ..default()
-        })
-        .insert(Collider::ball(ENEMY_SIZE))
-        .insert(ActiveEvents::COLLISION_EVENTS)
-        .insert(RigidBody::Dynamic)
-        .insert(AdditionalMassProperties::MassProperties(MassProperties {
-            mass: ENEMY_MASS,
-            principal_inertia: ENEMY_INERTIA,
-            ..default()
-        }))
-        .insert(ExternalForce::default())
-        .insert(ExternalImpulse::default())
-        .insert(Velocity::default())
-        .insert(Damping {
-            linear_damping: ENEMY_DAMPING,
-            ..default()
-        })
-        .insert(GravityScale(0.0))
-        .insert(Enemy);
 }
 
 /// Handles moving enemies
