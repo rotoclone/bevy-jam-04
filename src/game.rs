@@ -1,4 +1,4 @@
-use std::{f32::consts::PI, time::Duration};
+use std::{collections::HashMap, f32::consts::PI, ops::RangeInclusive, time::Duration};
 
 use bevy::{
     audio::{Volume, VolumeLevel},
@@ -23,7 +23,12 @@ use bevy_tweening::{
     Animator, AnimatorState, Delay, EaseFunction, Tracks, Tween, TweenCompleted,
 };
 use iyes_progress::{ProgressCounter, ProgressPlugin};
-use rand::{seq::SliceRandom, Rng};
+use rand::{
+    distributions::{Distribution, WeightedIndex},
+    seq::SliceRandom,
+    Rng,
+};
+use strum::{EnumIter, IntoEnumIterator};
 
 use crate::*;
 
@@ -127,6 +132,7 @@ impl Plugin for GamePlugin {
             TimerMode::Repeating,
         )))
         .insert_resource(SpawnAreas(Vec::new()))
+        .insert_resource(generate_starting_spawn_weights())
         .insert_resource(EntitiesToDespawn(Vec::new()))
         .insert_resource(Level {
             current_level: 1,
@@ -161,6 +167,28 @@ impl Plugin for GamePlugin {
     }
 }
 
+/// Generates the spawn weights that the game starts with
+fn generate_starting_spawn_weights() -> SpawnWeights {
+    let mut types = Vec::new();
+    let mut weights = Vec::new();
+    for enemy_type in EnemyType::iter() {
+        let weight = match enemy_type {
+            EnemyType::Regular => 0.55,
+            EnemyType::SmallAndFast => 0.2,
+            EnemyType::BigAndSlow => 0.2,
+            EnemyType::Assassin => 0.05,
+        };
+        types.push(enemy_type);
+        weights.push(weight);
+    }
+
+    SpawnWeights {
+        types,
+        weights: weights.clone(),
+        dist: WeightedIndex::new(weights).expect("weights should be valid"),
+    }
+}
+
 #[derive(AssetCollection, Resource)]
 pub struct ImageAssets {
     #[asset(path = "images/bg.png")]
@@ -180,6 +208,72 @@ struct SpawnTimer(Timer);
 
 #[derive(Resource)]
 struct SpawnAreas(Vec<Rect>);
+
+struct EnemyParams {
+    color: Color,
+    size: RangeInclusive<f32>,
+    max_speed: RangeInclusive<f32>,
+    damage: u64,
+    xp_reward: u64,
+}
+
+#[derive(Hash, PartialEq, Eq, Clone, Copy, EnumIter)]
+enum EnemyType {
+    Regular,
+    SmallAndFast,
+    BigAndSlow,
+    Assassin,
+}
+
+impl EnemyType {
+    /// Gets the parameters describing the provided enemy type
+    fn get_params(&self) -> EnemyParams {
+        match self {
+            EnemyType::Regular => EnemyParams {
+                color: Color::RED,
+                size: 4.0..=4.0,
+                max_speed: 30.0..=50.0,
+                damage: 5,
+                xp_reward: 1,
+            },
+            EnemyType::SmallAndFast => EnemyParams {
+                color: Color::SEA_GREEN,
+                size: 2.0..=2.0,
+                max_speed: 50.0..=70.0,
+                damage: 3,
+                xp_reward: 1,
+            },
+            EnemyType::BigAndSlow => EnemyParams {
+                color: Color::ORANGE_RED,
+                size: 7.0..=7.0,
+                max_speed: 10.0..=30.0,
+                damage: 10,
+                xp_reward: 1,
+            },
+            EnemyType::Assassin => EnemyParams {
+                color: Color::ANTIQUE_WHITE,
+                size: 3.0..=3.0,
+                max_speed: 70.0..=90.0,
+                damage: 15,
+                xp_reward: 2,
+            },
+        }
+    }
+}
+
+#[derive(Resource)]
+struct SpawnWeights {
+    types: Vec<EnemyType>,
+    weights: Vec<f32>,
+    dist: WeightedIndex<f32>,
+}
+
+impl SpawnWeights {
+    /// Picks a random enemy type based on the weights
+    fn choose_random_enemy_type(&self) -> EnemyType {
+        self.types[self.dist.sample(&mut rand::thread_rng())]
+    }
+}
 
 #[derive(Resource)]
 struct EntitiesToDespawn(Vec<Entity>);
@@ -239,7 +333,8 @@ struct Attacking(bool);
 #[derive(Component)]
 struct Enemy {
     damage: u64,
-    reward_xp: u64,
+    xp_reward: u64,
+    max_speed: f32,
 }
 
 #[derive(Component)]
@@ -732,6 +827,7 @@ fn spawn_enemies(
     commands: Commands,
     mut spawn_timer: ResMut<SpawnTimer>,
     spawn_areas: Res<SpawnAreas>,
+    spawn_weights: Res<SpawnWeights>,
     time: Res<Time>,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<ColorMaterial>>,
@@ -739,63 +835,85 @@ fn spawn_enemies(
     spawn_timer.0.tick(time.delta());
 
     if spawn_timer.0.just_finished() {
-        spawn_enemy(commands, spawn_areas, meshes, materials);
+        spawn_random_enemy(commands, spawn_areas, spawn_weights, meshes, materials);
     }
 }
 
-/// Spawns an enemy at a random location
-fn spawn_enemy(
-    mut commands: Commands,
+/// Spawns a random enemy at a random location
+fn spawn_random_enemy(
+    commands: Commands,
     spawn_areas: Res<SpawnAreas>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    spawn_weights: Res<SpawnWeights>,
+    meshes: ResMut<Assets<Mesh>>,
+    materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let mut rng = rand::thread_rng();
     if let Some(spawn_area) = spawn_areas.0.choose(&mut rng) {
         let x_coord = rng.gen_range(spawn_area.min.x..=spawn_area.max.x);
         let y_coord = rng.gen_range(spawn_area.min.y..=spawn_area.max.y);
 
-        commands
-            .spawn(MaterialMesh2dBundle {
-                mesh: meshes.add(shape::Circle::new(ENEMY_SIZE).into()).into(),
-                material: materials.add(ColorMaterial::from(Color::RED)),
-                transform: Transform::from_translation(Vec3::new(x_coord, y_coord, 0.)),
-                ..default()
-            })
-            .insert(GameComponent)
-            .insert(Collider::ball(ENEMY_SIZE))
-            .insert(ActiveEvents::COLLISION_EVENTS)
-            .insert(RigidBody::Dynamic)
-            .insert(AdditionalMassProperties::MassProperties(MassProperties {
-                mass: ENEMY_MASS,
-                principal_inertia: ENEMY_INERTIA,
-                ..default()
-            }))
-            .insert(ExternalForce::default())
-            .insert(ExternalImpulse::default())
-            .insert(Velocity::default())
-            .insert(Damping {
-                linear_damping: ENEMY_DAMPING,
-                ..default()
-            })
-            .insert(GravityScale(0.0))
-            .insert(Enemy {
-                damage: 5,
-                reward_xp: 1,
-            });
+        spawn_enemy(
+            commands,
+            Vec3::new(x_coord, y_coord, 0.0),
+            spawn_weights.choose_random_enemy_type().get_params(),
+            meshes,
+            materials,
+        );
     }
+}
+
+/// Spawns an enemy at the provided location
+fn spawn_enemy(
+    mut commands: Commands,
+    location: Vec3,
+    params: EnemyParams,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    let mut rng = rand::thread_rng();
+    let size = rng.gen_range(params.size);
+
+    commands
+        .spawn(MaterialMesh2dBundle {
+            mesh: meshes.add(shape::Circle::new(size).into()).into(),
+            material: materials.add(ColorMaterial::from(params.color)),
+            transform: Transform::from_translation(location),
+            ..default()
+        })
+        .insert(GameComponent)
+        .insert(Collider::ball(size))
+        .insert(ActiveEvents::COLLISION_EVENTS)
+        .insert(RigidBody::Dynamic)
+        .insert(AdditionalMassProperties::MassProperties(MassProperties {
+            mass: ENEMY_MASS,
+            principal_inertia: ENEMY_INERTIA,
+            ..default()
+        }))
+        .insert(ExternalForce::default())
+        .insert(ExternalImpulse::default())
+        .insert(Velocity::default())
+        .insert(Damping {
+            linear_damping: ENEMY_DAMPING,
+            ..default()
+        })
+        .insert(GravityScale(0.0))
+        .insert(Enemy {
+            damage: params.damage,
+            xp_reward: params.xp_reward,
+            max_speed: rng.gen_range(params.max_speed),
+        });
 }
 
 /// Handles moving enemies
 fn move_enemies(
     mut enemy_query: Query<
-        (&mut ExternalForce, &mut Velocity, &mut Transform),
-        (With<Enemy>, Without<Player>),
+        (&mut ExternalForce, &mut Velocity, &mut Transform, &Enemy),
+        Without<Player>,
     >,
     player_query: Query<&Transform, With<Player>>,
 ) {
     if let Ok(player_transform) = player_query.get_single() {
-        for (mut force, mut velocity, mut transform) in &mut enemy_query {
+        for (mut force, mut velocity, mut transform, enemy) in &mut enemy_query {
             // push enemy in direction of player
             let player_direction = player_transform.translation - transform.translation;
             let movement_force = player_direction.clamp_length(ENEMY_MOVE_FORCE, ENEMY_MOVE_FORCE);
@@ -811,7 +929,7 @@ fn move_enemies(
             velocity.angvel = 0.0;
 
             // clamp speed
-            velocity.linvel = velocity.linvel.clamp_length_max(ENEMY_MAX_SPEED);
+            velocity.linvel = velocity.linvel.clamp_length_max(enemy.max_speed);
         }
     }
 }
@@ -868,7 +986,7 @@ fn collisions(
                     // an enemy has hit the sword
                     if sword.active {
                         entities_to_despawn.0.push(enemy_entity);
-                        level.current_xp += enemy.reward_xp;
+                        level.current_xp += enemy.xp_reward;
                     }
                 }
             }

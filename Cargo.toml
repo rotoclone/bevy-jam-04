@@ -13,3 +13,4 @@ bevy_rapier2d = { version = "0.23.0", features = ["debug-render-2d"] }
 bevy_tweening = "0.9.0"
 rand = "0.8.5"
 smooth-bevy-cameras = "0.10.0"
+strum = { version = "0.25", features = ["derive"] }
