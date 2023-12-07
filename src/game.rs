@@ -2,10 +2,9 @@ use std::{f32::consts::PI, time::Duration};
 
 use bevy::{
     audio::{Volume, VolumeLevel},
-    ecs::query::{ReadOnlyWorldQuery, WorldQuery},
+    ecs::query::WorldQuery,
     input::common_conditions::input_just_pressed,
     sprite::MaterialMesh2dBundle,
-    transform,
 };
 use bevy_asset_loader::{
     asset_collection::AssetCollection,
@@ -80,6 +79,9 @@ const SPAWN_AREA_DEPTH: f32 = 25.0;
 const SPAWN_AREA_BUFFER: f32 = ENEMY_SIZE;
 
 const START_SPAWN_INTERVAL: Duration = Duration::from_millis(2000);
+const NEXT_LEVEL_XP_MULTIPLIER: f64 = 2.0;
+const STARTING_XP_THRESHOLD: u64 = 5;
+const STARTING_HEALTH: u64 = 100;
 
 const MOVE_LEFT_KEY: KeyCode = KeyCode::A;
 const MOVE_RIGHT_KEY: KeyCode = KeyCode::D;
@@ -126,6 +128,15 @@ impl Plugin for GamePlugin {
         )))
         .insert_resource(SpawnAreas(Vec::new()))
         .insert_resource(EntitiesToDespawn(Vec::new()))
+        .insert_resource(Level {
+            current_level: 1,
+            current_xp: 0,
+            xp_needed: STARTING_XP_THRESHOLD,
+        })
+        .insert_resource(Health {
+            current_health: STARTING_HEALTH,
+            max_health: STARTING_HEALTH,
+        })
         .add_systems(
             Update,
             (
@@ -138,6 +149,12 @@ impl Plugin for GamePlugin {
                 spawn_enemies.run_if(in_state(GameState::Game)),
                 move_enemies,
                 collisions,
+                update_level_display
+                    .after(collisions)
+                    .run_if(resource_changed::<Level>()),
+                update_health_display
+                    .after(collisions)
+                    .run_if(resource_changed::<Health>()),
             ),
         )
         .add_systems(PostUpdate, despawn_entities);
@@ -166,6 +183,29 @@ struct SpawnAreas(Vec<Rect>);
 
 #[derive(Resource)]
 struct EntitiesToDespawn(Vec<Entity>);
+
+#[derive(Resource)]
+struct Level {
+    current_level: u64,
+    current_xp: u64,
+    xp_needed: u64,
+}
+
+impl Level {
+    /// Advances to the next level
+    fn advance(&mut self) {
+        self.current_level += 1;
+
+        let new_xp_needed = self.xp_needed as f64 * NEXT_LEVEL_XP_MULTIPLIER;
+        self.xp_needed = new_xp_needed.round() as u64;
+    }
+}
+
+#[derive(Resource)]
+struct Health {
+    current_health: u64,
+    max_health: u64,
+}
 
 #[derive(Component)]
 struct LoadingComponent;
@@ -197,7 +237,19 @@ struct Sword {
 struct Attacking(bool);
 
 #[derive(Component)]
-struct Enemy;
+struct Enemy {
+    damage: u64,
+    reward_xp: u64,
+}
+
+#[derive(Component)]
+struct LevelText;
+
+#[derive(Component)]
+struct XpText;
+
+#[derive(Component)]
+struct HealthText;
 
 /// Sets up the loading screen.
 fn loading_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -244,18 +296,21 @@ fn game_setup(
     mut materials: ResMut<Assets<ColorMaterial>>,
     image_assets: Res<ImageAssets>,
     mut spawn_areas: ResMut<SpawnAreas>,
+    asset_server: Res<AssetServer>,
 ) {
     // background
-    commands.spawn(SpriteBundle {
-        sprite: Sprite {
-            custom_size: Some(PLAY_AREA_SIZE),
-            color: Color::WHITE.with_a(0.05),
+    commands
+        .spawn(SpriteBundle {
+            sprite: Sprite {
+                custom_size: Some(PLAY_AREA_SIZE),
+                color: Color::WHITE.with_a(0.05),
+                ..default()
+            },
+            texture: image_assets.background.clone(),
+            transform: Transform::from_translation(Vec3::new(0.0, 0.0, BACKGROUND_Z)),
             ..default()
-        },
-        texture: image_assets.background.clone(),
-        transform: Transform::from_translation(Vec3::new(0.0, 0.0, BACKGROUND_Z)),
-        ..default()
-    });
+        })
+        .insert(GameComponent);
 
     // spawn areas
     spawn_areas.0 = vec![
@@ -340,6 +395,7 @@ fn game_setup(
             transform: Transform::from_translation(Vec3::new(0., 0., 0.)),
             ..default()
         })
+        .insert(GameComponent)
         .insert(Collider::ball(PLAYER_SIZE))
         .insert(ActiveEvents::COLLISION_EVENTS)
         .insert(RigidBody::Dynamic)
@@ -388,6 +444,105 @@ fn game_setup(
                         .insert(Sensor)
                         .insert(Sword { active: false });
                 });
+        });
+
+    // health display
+    commands
+        .spawn(
+            TextBundle::from_section(
+                format!("Health: {STARTING_HEALTH}/{STARTING_HEALTH}"),
+                TextStyle {
+                    font: asset_server.load(MONO_FONT),
+                    font_size: 35.0,
+                    color: Color::WHITE,
+                },
+            )
+            .with_text_alignment(TextAlignment::Center)
+            .with_style(Style {
+                position_type: PositionType::Absolute,
+                top: Val::Px(10.0),
+                margin: UiRect {
+                    left: Val::Auto,
+                    right: Val::Auto,
+                    ..default()
+                },
+                ..default()
+            }),
+        )
+        .insert(GameComponent)
+        .insert(HealthText);
+
+    // right sidebar
+    commands
+        .spawn(NodeBundle {
+            style: Style {
+                width: Val::Percent(33.3),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                right: Val::Px(0.0),
+                top: Val::Px(0.0),
+                margin: UiRect {
+                    left: Val::Px(5.0),
+                    top: Val::Px(5.0),
+                    ..default()
+                },
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Start,
+                align_items: AlignItems::FlexEnd,
+                ..default()
+            },
+            ..default()
+        })
+        .insert(GameComponent)
+        .with_children(|parent| {
+            // level display
+            parent
+                .spawn(
+                    TextBundle::from_section(
+                        "Level 1",
+                        TextStyle {
+                            font: asset_server.load(MONO_FONT),
+                            font_size: 28.0,
+                            color: Color::Rgba {
+                                red: 0.75,
+                                green: 0.75,
+                                blue: 0.75,
+                                alpha: 1.0,
+                            },
+                        },
+                    )
+                    .with_text_alignment(TextAlignment::Center)
+                    .with_style(Style {
+                        margin: UiRect {
+                            bottom: Val::Px(5.0),
+                            ..default()
+                        },
+                        ..default()
+                    }),
+                )
+                .insert(LevelText);
+
+            // xp display
+            parent
+                .spawn(
+                    TextBundle::from_section(
+                        format!("XP: 0/{STARTING_XP_THRESHOLD}"),
+                        TextStyle {
+                            font: asset_server.load(MONO_FONT),
+                            font_size: 33.0,
+                            color: Color::WHITE,
+                        },
+                    )
+                    .with_text_alignment(TextAlignment::Center)
+                    .with_style(Style {
+                        margin: UiRect {
+                            bottom: Val::Px(5.0),
+                            ..default()
+                        },
+                        ..default()
+                    }),
+                )
+                .insert(XpText);
         });
 }
 
@@ -607,6 +762,7 @@ fn spawn_enemy(
                 transform: Transform::from_translation(Vec3::new(x_coord, y_coord, 0.)),
                 ..default()
             })
+            .insert(GameComponent)
             .insert(Collider::ball(ENEMY_SIZE))
             .insert(ActiveEvents::COLLISION_EVENTS)
             .insert(RigidBody::Dynamic)
@@ -623,7 +779,10 @@ fn spawn_enemy(
                 ..default()
             })
             .insert(GravityScale(0.0))
-            .insert(Enemy);
+            .insert(Enemy {
+                damage: 5,
+                reward_xp: 1,
+            });
     }
 }
 
@@ -661,6 +820,8 @@ fn move_enemies(
 fn collisions(
     mut collision_events: EventReader<CollisionEvent>,
     mut entities_to_despawn: ResMut<EntitiesToDespawn>,
+    mut level: ResMut<Level>,
+    mut health: ResMut<Health>,
     enemies_query: Query<(&Enemy, &Transform)>,
     sword_query: Query<&Sword>,
     mut player_query: Query<(&Player, &Transform, &mut ExternalImpulse)>,
@@ -682,6 +843,8 @@ fn collisions(
                 >(*a, *b, &player_query)
                 {
                     // an enemy has hit the player
+                    health.current_health = health.current_health.saturating_sub(enemy.damage);
+
                     if let Ok(player_transform) =
                         player_query.get_component::<Transform>(player_entity)
                     {
@@ -705,6 +868,7 @@ fn collisions(
                     // an enemy has hit the sword
                     if sword.active {
                         entities_to_despawn.0.push(enemy_entity);
+                        level.current_xp += enemy.reward_xp;
                     }
                 }
             }
@@ -732,6 +896,35 @@ fn get_from_either<'a, T: Component, Q: WorldQuery>(
 fn despawn_entities(mut commands: Commands, mut entities_to_despawn: ResMut<EntitiesToDespawn>) {
     for entity in entities_to_despawn.0.drain(0..) {
         commands.entity(entity).despawn_recursive();
+    }
+}
+
+/// Keeps the level display up to date
+fn update_level_display(
+    mut level: ResMut<Level>,
+    mut level_text_query: Query<&mut Text, (With<LevelText>, Without<XpText>)>,
+    mut xp_text_query: Query<&mut Text, (With<XpText>, Without<LevelText>)>,
+) {
+    while level.current_xp >= level.xp_needed {
+        level.advance();
+    }
+
+    for mut text in level_text_query.iter_mut() {
+        text.sections[0].value = format!("Level {}", level.current_level);
+    }
+
+    for mut text in xp_text_query.iter_mut() {
+        text.sections[0].value = format!("XP: {}/{}", level.current_xp, level.xp_needed);
+    }
+}
+
+/// Keeps the health display up to date
+fn update_health_display(
+    health: Res<Health>,
+    mut health_text_query: Query<&mut Text, With<HealthText>>,
+) {
+    for mut text in health_text_query.iter_mut() {
+        text.sections[0].value = format!("Health: {}/{}", health.current_health, health.max_health);
     }
 }
 
