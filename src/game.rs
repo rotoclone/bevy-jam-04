@@ -1,9 +1,9 @@
-use std::{collections::HashMap, f32::consts::PI, ops::RangeInclusive, time::Duration};
+use std::{f32::consts::PI, ops::RangeInclusive, time::Duration};
 
 use bevy::{
     audio::{Volume, VolumeLevel},
     ecs::query::WorldQuery,
-    input::common_conditions::input_just_pressed,
+    input::common_conditions::input_pressed,
     sprite::MaterialMesh2dBundle,
 };
 use bevy_asset_loader::{
@@ -37,16 +37,14 @@ const LOADING_FONT: &str = "fonts/MajorMonoDisplay-Regular.ttf";
 const PLAYER_SIZE: f32 = 5.0;
 const PLAYER_MAX_SPEED: f32 = 70.0;
 const PLAYER_MOVE_FORCE: f32 = 100000.0;
-const PLAYER_DAMPING: f32 = 10.0;
+const PLAYER_DAMPING: f32 = 8.0;
 const PLAYER_MASS: f32 = 100.0;
 const PLAYER_INERTIA: f32 = 16000.0;
 
-const ENEMY_SIZE: f32 = 4.0;
-const ENEMY_MAX_SPEED: f32 = 40.0;
-const ENEMY_MOVE_FORCE: f32 = 75000.0;
-const ENEMY_DAMPING: f32 = 10.0;
-const ENEMY_MASS: f32 = 100.0;
-const ENEMY_INERTIA: f32 = 16000.0;
+const ENEMY_MOVE_FORCE: f32 = 35000.0;
+const ENEMY_DAMPING: f32 = 4.0;
+const ENEMY_MASS: f32 = 50.0;
+const ENEMY_INERTIA: f32 = 8000.0;
 
 const HIT_IMPULSE: f32 = 50000.0;
 
@@ -57,10 +55,12 @@ const PLAYER_ATTACK_COOLDOWN: Duration = Duration::from_millis(1000);
 const SWORD_SWING_ROTATION_DEGREES: f32 = 60.0;
 const SWORD_SWING_TRANSLATION: f32 = 2.0;
 
-const SWORD_ANIMATION_TIME: Duration = Duration::from_millis(75);
+const SWORD_ANIMATION_TIME: Duration = Duration::from_millis(60);
 const SWORD_ANIMATION_END_DELAY: Duration = Duration::from_millis(100);
 const SWORD_TAKE_OUT_TIME: Duration = Duration::from_millis(1);
-const SWORD_PUT_AWAY_TIME: Duration = Duration::from_millis(150);
+const SWORD_PUT_AWAY_TIME: Duration = Duration::from_millis(80);
+const SWORD_SHADOW_1_DELAY: Duration = Duration::from_millis(25);
+const SWORD_SHADOW_2_DELAY: Duration = Duration::from_millis(50);
 
 const SWORD_START_SCALE: Vec3 = Vec3::new(1.0, 0.0, 1.0);
 const SWORD_END_SCALE: Vec3 = Vec3::ONE;
@@ -75,15 +75,22 @@ const SWORD_END_TRANSLATION: Vec3 =
 const SWORD_SWING_COMPLETE_EVENT_ID: u64 = 1;
 const ATTACK_DONE_EVENT_ID: u64 = 2;
 
+const HIT_SLOW_MO_TIME: Duration = Duration::from_millis(250);
+const HIT_SLOW_MO_TIME_SCALE: f32 = 0.5;
+
 const SWORD_Z: f32 = -1.0;
 const BACKGROUND_Z: f32 = -100.0;
 
 const PLAY_AREA_SIZE: Vec2 = Vec2::new(1000.0, 1000.0);
 
 const SPAWN_AREA_DEPTH: f32 = 25.0;
-const SPAWN_AREA_BUFFER: f32 = ENEMY_SIZE;
+const SPAWN_AREA_BUFFER: f32 = 10.0;
 
-const START_SPAWN_INTERVAL: Duration = Duration::from_millis(2000);
+const START_SPAWN_INTERVAL: Duration = Duration::from_millis(1000);
+const SPAWN_INTERVAL_CHANGE_INTERVAL: Duration = Duration::from_secs(5);
+const SPAWN_INTERVAL_CHANGE_MULTIPLIER: f32 = 0.95;
+const MIN_SPAWN_INTERVAL: Duration = Duration::from_millis(10);
+
 const NEXT_LEVEL_XP_MULTIPLIER: f64 = 2.0;
 const STARTING_XP_THRESHOLD: u64 = 5;
 const STARTING_HEALTH: u64 = 100;
@@ -127,8 +134,15 @@ impl Plugin for GamePlugin {
             ),
         );
 
+        let mut slow_mo_timer = Timer::new(HIT_SLOW_MO_TIME, TimerMode::Once);
+        slow_mo_timer.pause();
+
         app.insert_resource(SpawnTimer(Timer::new(
             START_SPAWN_INTERVAL,
+            TimerMode::Repeating,
+        )))
+        .insert_resource(SpawnIntervalChangeTimer(Timer::new(
+            SPAWN_INTERVAL_CHANGE_INTERVAL,
             TimerMode::Repeating,
         )))
         .insert_resource(SpawnAreas(Vec::new()))
@@ -143,12 +157,16 @@ impl Plugin for GamePlugin {
             current_health: STARTING_HEALTH,
             max_health: STARTING_HEALTH,
         })
+        .insert_resource(SlowMoTimer {
+            target_time_scale: 1.0,
+            timer: slow_mo_timer,
+        })
         .add_systems(
             Update,
             (
                 update_attack_cooldown.before(player_attack),
                 player_movement,
-                player_attack.run_if(input_just_pressed(ATTACK_INPUT)),
+                player_attack.run_if(input_pressed(ATTACK_INPUT)),
                 tween_completed,
                 move_camera.after(player_movement),
                 keep_player_in_bounds.after(player_movement),
@@ -161,6 +179,8 @@ impl Plugin for GamePlugin {
                 update_health_display
                     .after(collisions)
                     .run_if(resource_changed::<Health>()),
+                update_enemy_count_display,
+                slow_mo.run_if(in_state(GameState::Game)),
             ),
         )
         .add_systems(PostUpdate, despawn_entities);
@@ -205,6 +225,9 @@ pub struct AudioAssets {
 
 #[derive(Resource)]
 struct SpawnTimer(Timer);
+
+#[derive(Resource)]
+struct SpawnIntervalChangeTimer(Timer);
 
 #[derive(Resource)]
 struct SpawnAreas(Vec<Rect>);
@@ -301,6 +324,12 @@ struct Health {
     max_health: u64,
 }
 
+#[derive(Resource)]
+struct SlowMoTimer {
+    target_time_scale: f32,
+    timer: Timer,
+}
+
 #[derive(Component)]
 struct LoadingComponent;
 
@@ -342,6 +371,9 @@ struct LevelText;
 
 #[derive(Component)]
 struct XpText;
+
+#[derive(Component)]
+struct EnemyCountText;
 
 #[derive(Component)]
 struct HealthText;
@@ -459,8 +491,8 @@ fn game_setup(
                 start: SWORD_START_ROTATION,
                 end: SWORD_END_ROTATION,
             },
-        )
-        .with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID),
+        ),
+        //TODO .with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID),
         Tween::new(
             EaseFunction::QuadraticOut,
             SWORD_ANIMATION_TIME,
@@ -479,9 +511,89 @@ fn game_setup(
                 start: SWORD_END_SCALE,
                 end: SWORD_START_SCALE,
             },
-        )
-        .with_completed_event(ATTACK_DONE_EVENT_ID),
+        ), //TODO .with_completed_event(ATTACK_DONE_EVENT_ID),
     );
+
+    let sword_shadow_1_swing_tween = Delay::new(SWORD_SHADOW_1_DELAY)
+        .then(Tween::new(
+            EaseFunction::QuadraticOut,
+            SWORD_TAKE_OUT_TIME,
+            TransformScaleLens {
+                start: SWORD_START_SCALE,
+                end: SWORD_END_SCALE,
+            },
+        ))
+        .then(Tracks::new(vec![
+            Tween::new(
+                EaseFunction::QuadraticOut,
+                SWORD_ANIMATION_TIME,
+                TransformRotateZLens {
+                    start: SWORD_START_ROTATION,
+                    end: SWORD_END_ROTATION,
+                },
+            ),
+            //TODO .with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID),
+            Tween::new(
+                EaseFunction::QuadraticOut,
+                SWORD_ANIMATION_TIME,
+                TransformPositionLens {
+                    start: SWORD_START_TRANSLATION,
+                    end: SWORD_END_TRANSLATION,
+                },
+            ),
+        ]))
+        .then(Delay::new(SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_1_DELAY))
+        .then(
+            Tween::new(
+                EaseFunction::QuadraticIn,
+                SWORD_PUT_AWAY_TIME,
+                TransformScaleLens {
+                    start: SWORD_END_SCALE,
+                    end: SWORD_START_SCALE,
+                },
+            ), //TODO .with_completed_event(ATTACK_DONE_EVENT_ID),
+        );
+
+    let sword_shadow_2_swing_tween = Delay::new(SWORD_SHADOW_2_DELAY)
+        .then(Tween::new(
+            EaseFunction::QuadraticOut,
+            SWORD_TAKE_OUT_TIME,
+            TransformScaleLens {
+                start: SWORD_START_SCALE,
+                end: SWORD_END_SCALE,
+            },
+        ))
+        .then(Tracks::new(vec![
+            Tween::new(
+                EaseFunction::QuadraticOut,
+                SWORD_ANIMATION_TIME,
+                TransformRotateZLens {
+                    start: SWORD_START_ROTATION,
+                    end: SWORD_END_ROTATION,
+                },
+            )
+            .with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID),
+            Tween::new(
+                EaseFunction::QuadraticOut,
+                SWORD_ANIMATION_TIME,
+                TransformPositionLens {
+                    start: SWORD_START_TRANSLATION,
+                    end: SWORD_END_TRANSLATION,
+                },
+            ),
+        ]))
+        .then(Delay::new(SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_2_DELAY))
+        .then(
+            Tween::new(
+                EaseFunction::QuadraticIn,
+                SWORD_PUT_AWAY_TIME,
+                TransformScaleLens {
+                    start: SWORD_END_SCALE,
+                    end: SWORD_START_SCALE,
+                },
+            )
+            .with_completed_event(ATTACK_DONE_EVENT_ID),
+        );
 
     commands
         .spawn(MaterialMesh2dBundle {
@@ -528,6 +640,64 @@ fn game_setup(
                                 .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
                                 .into(),
                             material: materials.add(ColorMaterial::from(Color::GRAY)),
+                            transform: Transform::from_translation(Vec3::new(
+                                0.,
+                                SWORD_LENGTH / 2.0,
+                                0.,
+                            )),
+                            ..default()
+                        })
+                        .insert(Collider::cuboid(SWORD_WIDTH / 2.0, SWORD_LENGTH / 2.0))
+                        .insert(Sensor)
+                        .insert(Sword { active: false });
+                });
+
+            // sword shadow 1 pivot
+            parent
+                .spawn(SpatialBundle::from_transform(
+                    Transform::from_translation(SWORD_START_TRANSLATION)
+                        .with_scale(SWORD_START_SCALE)
+                        .with_rotation(Quat::from_rotation_z(SWORD_START_ROTATION)),
+                ))
+                .insert(SwordPivot)
+                .insert(Animator::new(sword_shadow_1_swing_tween).with_state(AnimatorState::Paused))
+                .with_children(|pivot| {
+                    // sword shadow 1
+                    pivot
+                        .spawn(MaterialMesh2dBundle {
+                            mesh: meshes
+                                .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
+                                .into(),
+                            material: materials.add(ColorMaterial::from(Color::GRAY.with_a(0.5))),
+                            transform: Transform::from_translation(Vec3::new(
+                                0.,
+                                SWORD_LENGTH / 2.0,
+                                0.,
+                            )),
+                            ..default()
+                        })
+                        .insert(Collider::cuboid(SWORD_WIDTH / 2.0, SWORD_LENGTH / 2.0))
+                        .insert(Sensor)
+                        .insert(Sword { active: false });
+                });
+
+            // sword shadow 2 pivot
+            parent
+                .spawn(SpatialBundle::from_transform(
+                    Transform::from_translation(SWORD_START_TRANSLATION)
+                        .with_scale(SWORD_START_SCALE)
+                        .with_rotation(Quat::from_rotation_z(SWORD_START_ROTATION)),
+                ))
+                .insert(SwordPivot)
+                .insert(Animator::new(sword_shadow_2_swing_tween).with_state(AnimatorState::Paused))
+                .with_children(|pivot| {
+                    // sword shadow 1
+                    pivot
+                        .spawn(MaterialMesh2dBundle {
+                            mesh: meshes
+                                .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
+                                .into(),
+                            material: materials.add(ColorMaterial::from(Color::GRAY.with_a(0.5))),
                             transform: Transform::from_translation(Vec3::new(
                                 0.,
                                 SWORD_LENGTH / 2.0,
@@ -638,6 +808,30 @@ fn game_setup(
                     }),
                 )
                 .insert(XpText);
+
+            // enemy count display
+            parent
+                .spawn(
+                    TextBundle::from_section(
+                        "Enemies: 0",
+                        TextStyle {
+                            font: asset_server.load(MONO_FONT),
+                            font_size: 20.0,
+                            color: Color::WHITE,
+                        },
+                    )
+                    .with_text_alignment(TextAlignment::Center)
+                    .with_style(Style {
+                        margin: UiRect {
+                            bottom: Val::Px(5.0),
+                            ..default()
+                        },
+                        position_type: PositionType::Absolute,
+                        bottom: Val::Px(5.0),
+                        ..default()
+                    }),
+                )
+                .insert(EnemyCountText);
         });
 }
 
@@ -826,6 +1020,7 @@ fn move_camera(
 fn spawn_enemies(
     commands: Commands,
     mut spawn_timer: ResMut<SpawnTimer>,
+    mut spawn_interval_change_timer: ResMut<SpawnIntervalChangeTimer>,
     spawn_areas: Res<SpawnAreas>,
     spawn_weights: Res<SpawnWeights>,
     time: Res<Time>,
@@ -833,9 +1028,19 @@ fn spawn_enemies(
     materials: ResMut<Assets<ColorMaterial>>,
 ) {
     spawn_timer.0.tick(time.delta());
-
     if spawn_timer.0.just_finished() {
         spawn_random_enemy(commands, spawn_areas, spawn_weights, meshes, materials);
+    }
+
+    spawn_interval_change_timer.0.tick(time.delta());
+    if spawn_interval_change_timer.0.just_finished() {
+        let new_duration = MIN_SPAWN_INTERVAL.max(
+            spawn_timer
+                .0
+                .duration()
+                .mul_f32(SPAWN_INTERVAL_CHANGE_MULTIPLIER),
+        );
+        spawn_timer.0.set_duration(new_duration)
     }
 }
 
@@ -940,6 +1145,7 @@ fn collisions(
     mut entities_to_despawn: ResMut<EntitiesToDespawn>,
     mut level: ResMut<Level>,
     mut health: ResMut<Health>,
+    mut slow_mo_timer: ResMut<SlowMoTimer>,
     enemies_query: Query<(&Enemy, &Transform)>,
     sword_query: Query<&Sword>,
     mut player_query: Query<(&Player, &Transform, &mut ExternalImpulse)>,
@@ -987,6 +1193,11 @@ fn collisions(
                     if sword.active {
                         entities_to_despawn.0.push(enemy_entity);
                         level.current_xp += enemy.xp_reward;
+
+                        slow_mo_timer.target_time_scale = HIT_SLOW_MO_TIME_SCALE;
+                        slow_mo_timer.timer.set_duration(HIT_SLOW_MO_TIME);
+                        slow_mo_timer.timer.reset();
+                        slow_mo_timer.timer.unpause();
                     }
                 }
             }
@@ -1043,6 +1254,27 @@ fn update_health_display(
 ) {
     for mut text in health_text_query.iter_mut() {
         text.sections[0].value = format!("Health: {}/{}", health.current_health, health.max_health);
+    }
+}
+
+/// Keeps the enemy count display up to date
+fn update_enemy_count_display(
+    enemy_query: Query<&Enemy>,
+    mut enemy_count_text_query: Query<&mut Text, With<EnemyCountText>>,
+) {
+    let enemy_count = enemy_query.iter().count();
+    for mut text in enemy_count_text_query.iter_mut() {
+        text.sections[0].value = format!("Enemies: {enemy_count}");
+    }
+}
+
+/// Handles making the game go in slow motion temporarily
+fn slow_mo(mut timer: ResMut<SlowMoTimer>, mut time: ResMut<Time<Virtual>>) {
+    timer.timer.tick(time.delta());
+    if timer.timer.paused() || timer.timer.finished() {
+        time.set_relative_speed(1.0);
+    } else {
+        time.set_relative_speed(timer.target_time_scale);
     }
 }
 
