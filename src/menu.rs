@@ -25,8 +25,8 @@ fn menu_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .spawn(NodeBundle {
             style: Style {
                 width: Val::Percent(100.0),
+                height: Val::Percent(33.0),
                 position_type: PositionType::Absolute,
-                top: Val::Px(10.0),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()

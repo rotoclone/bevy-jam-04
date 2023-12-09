@@ -20,7 +20,8 @@ use bevy_rapier2d::{
 };
 use bevy_tweening::{
     lens::{TransformPositionLens, TransformRotateZLens, TransformScaleLens},
-    Animator, AnimatorState, Delay, EaseFunction, Tracks, Tween, TweenCompleted,
+    Animator, AnimatorState, Delay, EaseFunction, EaseMethod, Sequence, Tracks, Tween,
+    TweenCompleted,
 };
 use iyes_progress::{ProgressCounter, ProgressPlugin};
 use rand::{
@@ -57,10 +58,12 @@ const SWORD_SWING_TRANSLATION: f32 = 2.0;
 
 const SWORD_ANIMATION_TIME: Duration = Duration::from_millis(60);
 const SWORD_ANIMATION_END_DELAY: Duration = Duration::from_millis(100);
-const SWORD_TAKE_OUT_TIME: Duration = Duration::from_millis(1);
 const SWORD_PUT_AWAY_TIME: Duration = Duration::from_millis(80);
-const SWORD_SHADOW_1_DELAY: Duration = Duration::from_millis(25);
-const SWORD_SHADOW_2_DELAY: Duration = Duration::from_millis(50);
+const SWORD_SHADOW_1_DELAY: Duration = Duration::from_millis(10);
+const SWORD_SHADOW_2_DELAY: Duration = Duration::from_millis(20);
+const SWORD_SHADOW_3_DELAY: Duration = Duration::from_millis(30);
+const SWORD_SHADOW_4_DELAY: Duration = Duration::from_millis(40);
+const SWORD_SHADOW_5_DELAY: Duration = Duration::from_millis(50);
 
 const SWORD_START_SCALE: Vec3 = Vec3::new(1.0, 0.0, 1.0);
 const SWORD_END_SCALE: Vec3 = Vec3::ONE;
@@ -94,6 +97,9 @@ const MIN_SPAWN_INTERVAL: Duration = Duration::from_millis(10);
 const NEXT_LEVEL_XP_MULTIPLIER: f64 = 2.0;
 const STARTING_XP_THRESHOLD: u64 = 5;
 const STARTING_HEALTH: u64 = 100;
+
+const MAX_ZOOM_LEVEL: f32 = 1.0;
+const ZOOM_LEVEL_MULTIPLIER: f32 = 1.05;
 
 const MOVE_LEFT_KEY: KeyCode = KeyCode::A;
 const MOVE_RIGHT_KEY: KeyCode = KeyCode::D;
@@ -134,61 +140,122 @@ impl Plugin for GamePlugin {
             ),
         );
 
-        let mut slow_mo_timer = Timer::new(HIT_SLOW_MO_TIME, TimerMode::Once);
-        slow_mo_timer.pause();
-
-        app.insert_resource(SpawnTimer(Timer::new(
-            START_SPAWN_INTERVAL,
-            TimerMode::Repeating,
-        )))
-        .insert_resource(SpawnIntervalChangeTimer(Timer::new(
-            SPAWN_INTERVAL_CHANGE_INTERVAL,
-            TimerMode::Repeating,
-        )))
-        .insert_resource(SpawnAreas(Vec::new()))
-        .insert_resource(generate_starting_spawn_weights())
-        .insert_resource(EntitiesToDespawn(Vec::new()))
+        // placeholder resources so things don't blow up before the game is set up
+        app.insert_resource(Health {
+            current_health: 1,
+            max_health: 1,
+        })
         .insert_resource(Level {
             current_level: 1,
             current_xp: 0,
-            xp_needed: STARTING_XP_THRESHOLD,
+            xp_needed: 1,
         })
-        .insert_resource(Health {
-            current_health: STARTING_HEALTH,
-            max_health: STARTING_HEALTH,
-        })
-        .insert_resource(SlowMoTimer {
-            target_time_scale: 1.0,
-            timer: slow_mo_timer,
-        })
-        .add_systems(
-            Update,
-            (
-                update_attack_cooldown.before(player_attack),
-                player_movement,
-                player_attack.run_if(input_pressed(ATTACK_INPUT)),
-                tween_completed,
-                move_camera.after(player_movement),
-                keep_player_in_bounds.after(player_movement),
-                spawn_enemies.run_if(in_state(GameState::Game)),
-                move_enemies,
-                collisions,
-                update_level_display
-                    .after(collisions)
-                    .run_if(resource_changed::<Level>()),
-                update_health_display
-                    .after(collisions)
-                    .run_if(resource_changed::<Health>()),
-                update_enemy_count_display,
-                slow_mo.run_if(in_state(GameState::Game)),
-            ),
-        )
-        .add_systems(PostUpdate, despawn_entities);
+        .insert_resource(EntitiesToDespawn(Vec::new()));
+
+        app.add_event::<LevelUp>()
+            .add_systems(
+                Update,
+                (
+                    update_attack_cooldown.before(player_attack),
+                    player_movement,
+                    player_attack.run_if(input_pressed(ATTACK_INPUT)),
+                    tween_completed,
+                    move_camera.after(player_movement),
+                    keep_player_in_bounds.after(player_movement),
+                    spawn_enemies.run_if(in_state(GameState::Game)),
+                    move_enemies,
+                    collisions.run_if(in_state(GameState::Game)),
+                    update_level_display
+                        .after(collisions)
+                        .run_if(resource_changed::<Level>()),
+                    update_health_display
+                        .after(collisions)
+                        .run_if(resource_changed::<Health>()),
+                    update_enemy_count_display,
+                    slow_mo.run_if(in_state(GameState::Game)),
+                    check_for_death.run_if(resource_changed::<Health>()),
+                    level_up.after(update_level_display),
+                ),
+            )
+            .add_systems(PostUpdate, despawn_entities);
     }
 }
 
-/// Generates the spawn weights that the game starts with
-fn generate_starting_spawn_weights() -> SpawnWeights {
+/// Sets up resources that the game starts with
+fn insert_starting_resources(commands: &mut Commands) {
+    commands.insert_resource(ZoomLevel(STARTING_ZOOM_LEVEL));
+    commands.insert_resource(build_starting_spawn_timer());
+    commands.insert_resource(build_starting_spawn_interval_change_timer());
+    commands.insert_resource(build_spawn_areas());
+    commands.insert_resource(build_starting_spawn_weights());
+    commands.insert_resource(EntitiesToDespawn(Vec::new()));
+    commands.insert_resource(Level {
+        current_level: 1,
+        current_xp: 0,
+        xp_needed: STARTING_XP_THRESHOLD,
+    });
+    commands.insert_resource(Health {
+        current_health: STARTING_HEALTH,
+        max_health: STARTING_HEALTH,
+    });
+
+    let mut slow_mo_timer = Timer::new(HIT_SLOW_MO_TIME, TimerMode::Once);
+    slow_mo_timer.pause();
+    commands.insert_resource(SlowMoTimer {
+        target_time_scale: 1.0,
+        timer: slow_mo_timer,
+    });
+}
+
+/// Builds the spawn areas
+fn build_spawn_areas() -> SpawnAreas {
+    SpawnAreas(vec![
+        // left
+        Rect::new(
+            (-PLAY_AREA_SIZE.x / 2.0) - (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
+            -PLAY_AREA_SIZE.y / 2.0,
+            (-PLAY_AREA_SIZE.x / 2.0) - SPAWN_AREA_BUFFER,
+            PLAY_AREA_SIZE.y / 2.0,
+        ),
+        // right
+        Rect::new(
+            (PLAY_AREA_SIZE.x / 2.0) + (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
+            -PLAY_AREA_SIZE.y / 2.0,
+            (PLAY_AREA_SIZE.x / 2.0) + SPAWN_AREA_BUFFER,
+            PLAY_AREA_SIZE.y / 2.0,
+        ),
+        // top
+        Rect::new(
+            -PLAY_AREA_SIZE.x / 2.0,
+            (PLAY_AREA_SIZE.y / 2.0) + (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
+            PLAY_AREA_SIZE.x / 2.0,
+            (PLAY_AREA_SIZE.y / 2.0) + SPAWN_AREA_BUFFER,
+        ),
+        // bottom
+        Rect::new(
+            -PLAY_AREA_SIZE.x / 2.0,
+            (-PLAY_AREA_SIZE.y / 2.0) - (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
+            PLAY_AREA_SIZE.x / 2.0,
+            (-PLAY_AREA_SIZE.y / 2.0) - SPAWN_AREA_BUFFER,
+        ),
+    ])
+}
+
+/// Builds the spawn timer that the game starts with
+fn build_starting_spawn_timer() -> SpawnTimer {
+    SpawnTimer(Timer::new(START_SPAWN_INTERVAL, TimerMode::Repeating))
+}
+
+/// Builds the spawn interval change timer that the game starts with
+fn build_starting_spawn_interval_change_timer() -> SpawnIntervalChangeTimer {
+    SpawnIntervalChangeTimer(Timer::new(
+        SPAWN_INTERVAL_CHANGE_INTERVAL,
+        TimerMode::Repeating,
+    ))
+}
+
+/// Builds the spawn weights that the game starts with
+fn build_starting_spawn_weights() -> SpawnWeights {
     let mut types = Vec::new();
     let mut weights = Vec::new();
     for enemy_type in EnemyType::iter() {
@@ -302,9 +369,9 @@ impl SpawnWeights {
 struct EntitiesToDespawn(Vec<Entity>);
 
 #[derive(Resource)]
-struct Level {
-    current_level: u64,
-    current_xp: u64,
+pub struct Level {
+    pub current_level: u64,
+    pub current_xp: u64,
     xp_needed: u64,
 }
 
@@ -378,6 +445,11 @@ struct EnemyCountText;
 #[derive(Component)]
 struct HealthText;
 
+#[derive(Event)]
+struct LevelUp {
+    new_level: u64,
+}
+
 /// Sets up the loading screen.
 fn loading_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
@@ -422,9 +494,10 @@ fn game_setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     image_assets: Res<ImageAssets>,
-    mut spawn_areas: ResMut<SpawnAreas>,
     asset_server: Res<AssetServer>,
 ) {
+    insert_starting_resources(&mut commands);
+
     // background
     commands
         .spawn(SpriteBundle {
@@ -439,161 +512,99 @@ fn game_setup(
         })
         .insert(GameComponent);
 
-    // spawn areas
-    spawn_areas.0 = vec![
-        // left
-        Rect::new(
-            (-PLAY_AREA_SIZE.x / 2.0) - (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
-            -PLAY_AREA_SIZE.y / 2.0,
-            (-PLAY_AREA_SIZE.x / 2.0) - SPAWN_AREA_BUFFER,
-            PLAY_AREA_SIZE.y / 2.0,
-        ),
-        // right
-        Rect::new(
-            (PLAY_AREA_SIZE.x / 2.0) + (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
-            -PLAY_AREA_SIZE.y / 2.0,
-            (PLAY_AREA_SIZE.x / 2.0) + SPAWN_AREA_BUFFER,
-            PLAY_AREA_SIZE.y / 2.0,
-        ),
-        // top
-        Rect::new(
-            -PLAY_AREA_SIZE.x / 2.0,
-            (PLAY_AREA_SIZE.y / 2.0) + (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
-            PLAY_AREA_SIZE.x / 2.0,
-            (PLAY_AREA_SIZE.y / 2.0) + SPAWN_AREA_BUFFER,
-        ),
-        // bottom
-        Rect::new(
-            -PLAY_AREA_SIZE.x / 2.0,
-            (-PLAY_AREA_SIZE.y / 2.0) - (SPAWN_AREA_DEPTH + SPAWN_AREA_BUFFER),
-            PLAY_AREA_SIZE.x / 2.0,
-            (-PLAY_AREA_SIZE.y / 2.0) - SPAWN_AREA_BUFFER,
-        ),
-    ];
-
     // player
     let mut attack_cooldown = AttackCooldown(Timer::new(PLAYER_ATTACK_COOLDOWN, TimerMode::Once));
     attack_cooldown.0.set_elapsed(PLAYER_ATTACK_COOLDOWN);
 
-    let sword_swing_tween = Tween::new(
-        EaseFunction::QuadraticOut,
-        SWORD_TAKE_OUT_TIME,
-        TransformScaleLens {
-            start: SWORD_START_SCALE,
-            end: SWORD_END_SCALE,
-        },
-    )
-    .then(Tracks::new(vec![
-        Tween::new(
-            EaseFunction::QuadraticOut,
-            SWORD_ANIMATION_TIME,
-            TransformRotateZLens {
-                start: SWORD_START_ROTATION,
-                end: SWORD_END_ROTATION,
-            },
-        ),
-        //TODO .with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID),
-        Tween::new(
-            EaseFunction::QuadraticOut,
-            SWORD_ANIMATION_TIME,
-            TransformPositionLens {
-                start: SWORD_START_TRANSLATION,
-                end: SWORD_END_TRANSLATION,
-            },
-        ),
-    ]))
-    .then(Delay::new(SWORD_ANIMATION_END_DELAY))
-    .then(
-        Tween::new(
-            EaseFunction::QuadraticIn,
-            SWORD_PUT_AWAY_TIME,
-            TransformScaleLens {
-                start: SWORD_END_SCALE,
-                end: SWORD_START_SCALE,
-            },
-        ), //TODO .with_completed_event(ATTACK_DONE_EVENT_ID),
-    );
+    let sword_swing_params = SwordAnimationParams {
+        start_delay: Duration::from_nanos(1),
+        start_scale: SWORD_START_SCALE,
+        end_scale: SWORD_END_SCALE,
+        swing_time: SWORD_ANIMATION_TIME,
+        start_rotation: SWORD_START_ROTATION,
+        end_rotation: SWORD_END_ROTATION,
+        start_translation: SWORD_START_TRANSLATION,
+        end_translation: SWORD_END_TRANSLATION,
+        send_swing_complete_event: false,
+        swing_end_delay: SWORD_ANIMATION_END_DELAY,
+        put_away_time: SWORD_PUT_AWAY_TIME,
+        send_attack_done_event: false,
+    };
 
-    let sword_shadow_1_swing_tween = Delay::new(SWORD_SHADOW_1_DELAY)
-        .then(Tween::new(
-            EaseFunction::QuadraticOut,
-            SWORD_TAKE_OUT_TIME,
-            TransformScaleLens {
-                start: SWORD_START_SCALE,
-                end: SWORD_END_SCALE,
-            },
-        ))
-        .then(Tracks::new(vec![
-            Tween::new(
-                EaseFunction::QuadraticOut,
-                SWORD_ANIMATION_TIME,
-                TransformRotateZLens {
-                    start: SWORD_START_ROTATION,
-                    end: SWORD_END_ROTATION,
-                },
-            ),
-            //TODO .with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID),
-            Tween::new(
-                EaseFunction::QuadraticOut,
-                SWORD_ANIMATION_TIME,
-                TransformPositionLens {
-                    start: SWORD_START_TRANSLATION,
-                    end: SWORD_END_TRANSLATION,
-                },
-            ),
-        ]))
-        .then(Delay::new(SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_1_DELAY))
-        .then(
-            Tween::new(
-                EaseFunction::QuadraticIn,
-                SWORD_PUT_AWAY_TIME,
-                TransformScaleLens {
-                    start: SWORD_END_SCALE,
-                    end: SWORD_START_SCALE,
-                },
-            ), //TODO .with_completed_event(ATTACK_DONE_EVENT_ID),
-        );
+    let sword_shadow_1_swing_params = SwordAnimationParams {
+        start_delay: SWORD_SHADOW_1_DELAY,
+        start_scale: SWORD_START_SCALE,
+        end_scale: SWORD_END_SCALE,
+        swing_time: SWORD_ANIMATION_TIME,
+        start_rotation: SWORD_START_ROTATION,
+        end_rotation: SWORD_END_ROTATION,
+        start_translation: SWORD_START_TRANSLATION,
+        end_translation: SWORD_END_TRANSLATION,
+        send_swing_complete_event: false,
+        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_1_DELAY,
+        put_away_time: SWORD_PUT_AWAY_TIME,
+        send_attack_done_event: false,
+    };
 
-    let sword_shadow_2_swing_tween = Delay::new(SWORD_SHADOW_2_DELAY)
-        .then(Tween::new(
-            EaseFunction::QuadraticOut,
-            SWORD_TAKE_OUT_TIME,
-            TransformScaleLens {
-                start: SWORD_START_SCALE,
-                end: SWORD_END_SCALE,
-            },
-        ))
-        .then(Tracks::new(vec![
-            Tween::new(
-                EaseFunction::QuadraticOut,
-                SWORD_ANIMATION_TIME,
-                TransformRotateZLens {
-                    start: SWORD_START_ROTATION,
-                    end: SWORD_END_ROTATION,
-                },
-            )
-            .with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID),
-            Tween::new(
-                EaseFunction::QuadraticOut,
-                SWORD_ANIMATION_TIME,
-                TransformPositionLens {
-                    start: SWORD_START_TRANSLATION,
-                    end: SWORD_END_TRANSLATION,
-                },
-            ),
-        ]))
-        .then(Delay::new(SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_2_DELAY))
-        .then(
-            Tween::new(
-                EaseFunction::QuadraticIn,
-                SWORD_PUT_AWAY_TIME,
-                TransformScaleLens {
-                    start: SWORD_END_SCALE,
-                    end: SWORD_START_SCALE,
-                },
-            )
-            .with_completed_event(ATTACK_DONE_EVENT_ID),
-        );
+    let sword_shadow_2_swing_params = SwordAnimationParams {
+        start_delay: SWORD_SHADOW_2_DELAY,
+        start_scale: SWORD_START_SCALE,
+        end_scale: SWORD_END_SCALE,
+        swing_time: SWORD_ANIMATION_TIME,
+        start_rotation: SWORD_START_ROTATION,
+        end_rotation: SWORD_END_ROTATION,
+        start_translation: SWORD_START_TRANSLATION,
+        end_translation: SWORD_END_TRANSLATION,
+        send_swing_complete_event: false,
+        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_2_DELAY,
+        put_away_time: SWORD_PUT_AWAY_TIME,
+        send_attack_done_event: false,
+    };
+
+    let sword_shadow_3_swing_params = SwordAnimationParams {
+        start_delay: SWORD_SHADOW_3_DELAY,
+        start_scale: SWORD_START_SCALE,
+        end_scale: SWORD_END_SCALE,
+        swing_time: SWORD_ANIMATION_TIME,
+        start_rotation: SWORD_START_ROTATION,
+        end_rotation: SWORD_END_ROTATION,
+        start_translation: SWORD_START_TRANSLATION,
+        end_translation: SWORD_END_TRANSLATION,
+        send_swing_complete_event: false,
+        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_3_DELAY,
+        put_away_time: SWORD_PUT_AWAY_TIME,
+        send_attack_done_event: false,
+    };
+
+    let sword_shadow_4_swing_params = SwordAnimationParams {
+        start_delay: SWORD_SHADOW_4_DELAY,
+        start_scale: SWORD_START_SCALE,
+        end_scale: SWORD_END_SCALE,
+        swing_time: SWORD_ANIMATION_TIME,
+        start_rotation: SWORD_START_ROTATION,
+        end_rotation: SWORD_END_ROTATION,
+        start_translation: SWORD_START_TRANSLATION,
+        end_translation: SWORD_END_TRANSLATION,
+        send_swing_complete_event: false,
+        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_4_DELAY,
+        put_away_time: SWORD_PUT_AWAY_TIME,
+        send_attack_done_event: false,
+    };
+
+    let sword_shadow_5_swing_params = SwordAnimationParams {
+        start_delay: SWORD_SHADOW_4_DELAY,
+        start_scale: SWORD_START_SCALE,
+        end_scale: SWORD_END_SCALE,
+        swing_time: SWORD_ANIMATION_TIME,
+        start_rotation: SWORD_START_ROTATION,
+        end_rotation: SWORD_END_ROTATION,
+        start_translation: SWORD_START_TRANSLATION,
+        end_translation: SWORD_END_TRANSLATION,
+        send_swing_complete_event: true,
+        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_5_DELAY,
+        put_away_time: SWORD_PUT_AWAY_TIME,
+        send_attack_done_event: true,
+    };
 
     commands
         .spawn(MaterialMesh2dBundle {
@@ -623,92 +634,47 @@ fn game_setup(
         .insert(Attacking(false))
         .insert(attack_cooldown)
         .with_children(|parent| {
-            // sword pivot
-            parent
-                .spawn(SpatialBundle::from_transform(
-                    Transform::from_translation(SWORD_START_TRANSLATION)
-                        .with_scale(SWORD_START_SCALE)
-                        .with_rotation(Quat::from_rotation_z(SWORD_START_ROTATION)),
-                ))
-                .insert(SwordPivot)
-                .insert(Animator::new(sword_swing_tween).with_state(AnimatorState::Paused))
-                .with_children(|pivot| {
-                    // sword
-                    pivot
-                        .spawn(MaterialMesh2dBundle {
-                            mesh: meshes
-                                .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
-                                .into(),
-                            material: materials.add(ColorMaterial::from(Color::GRAY)),
-                            transform: Transform::from_translation(Vec3::new(
-                                0.,
-                                SWORD_LENGTH / 2.0,
-                                0.,
-                            )),
-                            ..default()
-                        })
-                        .insert(Collider::cuboid(SWORD_WIDTH / 2.0, SWORD_LENGTH / 2.0))
-                        .insert(Sensor)
-                        .insert(Sword { active: false });
-                });
+            spawn_sword_pivot(parent, &mut meshes, &mut materials, sword_swing_params, 1.0);
 
-            // sword shadow 1 pivot
-            parent
-                .spawn(SpatialBundle::from_transform(
-                    Transform::from_translation(SWORD_START_TRANSLATION)
-                        .with_scale(SWORD_START_SCALE)
-                        .with_rotation(Quat::from_rotation_z(SWORD_START_ROTATION)),
-                ))
-                .insert(SwordPivot)
-                .insert(Animator::new(sword_shadow_1_swing_tween).with_state(AnimatorState::Paused))
-                .with_children(|pivot| {
-                    // sword shadow 1
-                    pivot
-                        .spawn(MaterialMesh2dBundle {
-                            mesh: meshes
-                                .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
-                                .into(),
-                            material: materials.add(ColorMaterial::from(Color::GRAY.with_a(0.5))),
-                            transform: Transform::from_translation(Vec3::new(
-                                0.,
-                                SWORD_LENGTH / 2.0,
-                                0.,
-                            )),
-                            ..default()
-                        })
-                        .insert(Collider::cuboid(SWORD_WIDTH / 2.0, SWORD_LENGTH / 2.0))
-                        .insert(Sensor)
-                        .insert(Sword { active: false });
-                });
+            spawn_sword_pivot(
+                parent,
+                &mut meshes,
+                &mut materials,
+                sword_shadow_1_swing_params,
+                0.7,
+            );
 
-            // sword shadow 2 pivot
-            parent
-                .spawn(SpatialBundle::from_transform(
-                    Transform::from_translation(SWORD_START_TRANSLATION)
-                        .with_scale(SWORD_START_SCALE)
-                        .with_rotation(Quat::from_rotation_z(SWORD_START_ROTATION)),
-                ))
-                .insert(SwordPivot)
-                .insert(Animator::new(sword_shadow_2_swing_tween).with_state(AnimatorState::Paused))
-                .with_children(|pivot| {
-                    // sword shadow 1
-                    pivot
-                        .spawn(MaterialMesh2dBundle {
-                            mesh: meshes
-                                .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
-                                .into(),
-                            material: materials.add(ColorMaterial::from(Color::GRAY.with_a(0.5))),
-                            transform: Transform::from_translation(Vec3::new(
-                                0.,
-                                SWORD_LENGTH / 2.0,
-                                0.,
-                            )),
-                            ..default()
-                        })
-                        .insert(Collider::cuboid(SWORD_WIDTH / 2.0, SWORD_LENGTH / 2.0))
-                        .insert(Sensor)
-                        .insert(Sword { active: false });
-                });
+            spawn_sword_pivot(
+                parent,
+                &mut meshes,
+                &mut materials,
+                sword_shadow_2_swing_params,
+                0.6,
+            );
+
+            spawn_sword_pivot(
+                parent,
+                &mut meshes,
+                &mut materials,
+                sword_shadow_3_swing_params,
+                0.5,
+            );
+
+            spawn_sword_pivot(
+                parent,
+                &mut meshes,
+                &mut materials,
+                sword_shadow_4_swing_params,
+                0.4,
+            );
+
+            spawn_sword_pivot(
+                parent,
+                &mut meshes,
+                &mut materials,
+                sword_shadow_5_swing_params,
+                0.3,
+            );
         });
 
     // health display
@@ -832,6 +798,109 @@ fn game_setup(
                     }),
                 )
                 .insert(EnemyCountText);
+        });
+}
+
+#[derive(Component)]
+struct SwordAnimationParams {
+    start_delay: Duration,
+    start_scale: Vec3,
+    end_scale: Vec3,
+    swing_time: Duration,
+    start_rotation: f32,
+    end_rotation: f32,
+    start_translation: Vec3,
+    end_translation: Vec3,
+    send_swing_complete_event: bool,
+    swing_end_delay: Duration,
+    put_away_time: Duration,
+    send_attack_done_event: bool,
+}
+
+/// Builds the animation for a sword swing
+fn build_sword_animation(params: &SwordAnimationParams) -> Sequence<Transform> {
+    let mut rotate_tween = Tween::new(
+        EaseFunction::QuadraticOut,
+        params.swing_time,
+        TransformRotateZLens {
+            start: params.start_rotation,
+            end: params.end_rotation,
+        },
+    );
+    if params.send_swing_complete_event {
+        rotate_tween = rotate_tween.with_completed_event(SWORD_SWING_COMPLETE_EVENT_ID);
+    }
+
+    let mut put_away_tween = Tween::new(
+        EaseFunction::QuadraticIn,
+        params.put_away_time,
+        TransformScaleLens {
+            start: params.end_scale,
+            end: params.start_scale,
+        },
+    );
+    if params.send_attack_done_event {
+        put_away_tween = put_away_tween.with_completed_event(ATTACK_DONE_EVENT_ID);
+    }
+
+    Delay::new(params.start_delay)
+        .then(Tween::new(
+            EaseMethod::Discrete(0.0),
+            Duration::from_nanos(1),
+            TransformScaleLens {
+                start: params.start_scale,
+                end: params.end_scale,
+            },
+        ))
+        .then(Tracks::new(vec![
+            rotate_tween,
+            Tween::new(
+                EaseFunction::QuadraticOut,
+                params.swing_time,
+                TransformPositionLens {
+                    start: params.start_translation,
+                    end: params.end_translation,
+                },
+            ),
+        ]))
+        .then(Delay::new(params.swing_end_delay))
+        .then(put_away_tween)
+}
+
+fn spawn_sword_pivot(
+    parent: &mut ChildBuilder,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<ColorMaterial>>,
+    animation_params: SwordAnimationParams,
+    alpha: f32,
+) {
+    // pivot
+    parent
+        .spawn(SpatialBundle::from_transform(
+            Transform::from_translation(SWORD_START_TRANSLATION)
+                .with_scale(SWORD_START_SCALE)
+                .with_rotation(Quat::from_rotation_z(SWORD_START_ROTATION)),
+        ))
+        .insert(SwordPivot)
+        .insert(
+            Animator::new(build_sword_animation(&animation_params))
+                .with_state(AnimatorState::Paused),
+        )
+        .insert(animation_params)
+        .with_children(|pivot| {
+            // sword
+            pivot
+                .spawn(MaterialMesh2dBundle {
+                    mesh: meshes
+                        .add(shape::Quad::new(Vec2::new(SWORD_WIDTH, SWORD_LENGTH)).into())
+                        .into(),
+                    material: materials.add(ColorMaterial::from(Color::GRAY.with_a(alpha))),
+                    transform: Transform::from_translation(Vec3::new(0., SWORD_LENGTH / 2.0, 0.)),
+                    ..default()
+                })
+                .insert(Collider::cuboid(SWORD_WIDTH / 2.0, SWORD_LENGTH / 2.0))
+                .insert(Sensor)
+                .insert(Sword { active: false });
         });
 }
 
@@ -1231,11 +1300,15 @@ fn despawn_entities(mut commands: Commands, mut entities_to_despawn: ResMut<Enti
 /// Keeps the level display up to date
 fn update_level_display(
     mut level: ResMut<Level>,
+    mut level_up_events: EventWriter<LevelUp>,
     mut level_text_query: Query<&mut Text, (With<LevelText>, Without<XpText>)>,
     mut xp_text_query: Query<&mut Text, (With<XpText>, Without<LevelText>)>,
 ) {
     while level.current_xp >= level.xp_needed {
         level.advance();
+        level_up_events.send(LevelUp {
+            new_level: level.current_level,
+        });
     }
 
     for mut text in level_text_query.iter_mut() {
@@ -1275,6 +1348,50 @@ fn slow_mo(mut timer: ResMut<SlowMoTimer>, mut time: ResMut<Time<Virtual>>) {
         time.set_relative_speed(1.0);
     } else {
         time.set_relative_speed(timer.target_time_scale);
+    }
+}
+
+/// Handles doing things when the player levels up
+fn level_up(
+    mut level_up_events: EventReader<LevelUp>,
+    mut zoom: ResMut<ZoomLevel>,
+    mut sword_pivot_query: Query<
+        (&mut SwordAnimationParams, &mut Animator<Transform>),
+        With<SwordPivot>,
+    >,
+    mut player_query: Query<&mut AttackCooldown, With<Player>>,
+) {
+    for event in level_up_events.read() {
+        // zoom out a bit
+        let new_zoom = MAX_ZOOM_LEVEL.min(zoom.0 * ZOOM_LEVEL_MULTIPLIER);
+        zoom.0 = new_zoom;
+
+        // make sword longer and swing wider
+        // TODO remove
+        for (mut swing_params, mut animator) in sword_pivot_query.iter_mut() {
+            swing_params.end_scale.y *= 1.1;
+            swing_params.start_rotation *= 1.1;
+            swing_params.end_rotation *= 1.1;
+            *animator =
+                Animator::new(build_sword_animation(&swing_params)).with_state(animator.state);
+        }
+
+        // reduce attack cooldown
+        // TODO remove
+        for mut cooldown in player_query.iter_mut() {
+            let new_duration = cooldown.0.duration().mul_f32(0.8);
+            cooldown.0.set_duration(new_duration);
+        }
+
+        // display perk chooser
+        //TODO
+    }
+}
+
+/// Checks if the player is dead, and ends the game if they are
+fn check_for_death(mut next_state: ResMut<NextState<GameState>>, health: Res<Health>) {
+    if health.current_health == 0 {
+        next_state.set(GameState::GameOver);
     }
 }
 

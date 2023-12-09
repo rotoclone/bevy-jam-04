@@ -8,13 +8,16 @@ use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_rapier2d::plugin::{NoUserData, RapierConfiguration, RapierPhysicsPlugin};
 use bevy_tweening::TweeningPlugin;
 use bevy_wasm_window_resize::WindowResizePlugin;
+use smooth_bevy_cameras::{LookTransform, LookTransformBundle, LookTransformPlugin, Smoother};
 
 mod menu;
 use menu::*;
 
 mod game;
 use game::*;
-use smooth_bevy_cameras::{LookTransform, LookTransformBundle, LookTransformPlugin, Smoother};
+
+mod game_over;
+use game_over::*;
 
 const DEV_MODE: bool = false;
 
@@ -32,7 +35,7 @@ const MAIN_FONT: &str = "fonts/SofiaSans-Light.ttf";
 const MONO_FONT: &str = "fonts/MajorMonoDisplay-Regular.ttf";
 
 const MASTER_VOLUME: f32 = 0.5;
-const ZOOM_LEVEL: f32 = 0.33;
+const STARTING_ZOOM_LEVEL: f32 = 0.33;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, States)]
 pub enum GameState {
@@ -40,13 +43,14 @@ pub enum GameState {
     Menu,
     GameLoading,
     Game,
+    GameOver,
 }
 
 #[derive(Component)]
 pub struct MainCamera;
 
 #[derive(Resource)]
-pub struct ZoomLevel(f32);
+pub struct ZoomLevel(pub f32);
 
 #[derive(Component)]
 pub struct DisabledButton;
@@ -56,7 +60,7 @@ fn main() {
     app.insert_resource(ClearColor(Color::BLACK))
         .insert_resource(Msaa::Sample4)
         .insert_resource(GlobalVolume::new(MASTER_VOLUME))
-        .insert_resource(ZoomLevel(ZOOM_LEVEL))
+        .insert_resource(ZoomLevel(STARTING_ZOOM_LEVEL))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "There's Too Many Of Them".into(),
@@ -79,7 +83,7 @@ fn main() {
         .add_plugins(LookTransformPlugin)
         .add_state::<GameState>()
         .add_systems(Startup, setup)
-        .add_plugins((MenuPlugin, GamePlugin))
+        .add_plugins((MenuPlugin, GamePlugin, GameOverPlugin))
         .add_systems(Update, (zoom_based_on_window_size, button_color_system));
 
     if DEV_MODE {
@@ -107,15 +111,21 @@ fn setup(mut commands: Commands) {
 /// Adjusts the camera zoom when the window is resized
 fn zoom_based_on_window_size(
     mut camera_query: Query<&mut OrthographicProjection, With<MainCamera>>,
+    window_query: Query<&Window>,
     zoom_level: Res<ZoomLevel>,
     mut resize_reader: EventReader<WindowResized>,
 ) {
     let mut projection = camera_query.single_mut();
 
+    let mut base_scale = (WINDOW_WIDTH / window_query.single().width())
+        .min(WINDOW_HEIGHT / window_query.single().height());
+    /*
     for event in resize_reader.read() {
-        projection.scale =
-            (WINDOW_WIDTH / event.width).max(WINDOW_HEIGHT / event.height) * zoom_level.0;
+        base_scale = (WINDOW_WIDTH / event.width).max(WINDOW_HEIGHT / event.height);
     }
+    */
+
+    projection.scale = base_scale * zoom_level.0;
 }
 
 type InteractedButtonTuple = (Changed<Interaction>, With<Button>, Without<DisabledButton>);
