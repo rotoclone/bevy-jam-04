@@ -59,11 +59,18 @@ const SWORD_SWING_TRANSLATION: f32 = 2.0;
 const SWORD_ANIMATION_TIME: Duration = Duration::from_millis(60);
 const SWORD_ANIMATION_END_DELAY: Duration = Duration::from_millis(100);
 const SWORD_PUT_AWAY_TIME: Duration = Duration::from_millis(80);
-const SWORD_SHADOW_1_DELAY: Duration = Duration::from_millis(10);
-const SWORD_SHADOW_2_DELAY: Duration = Duration::from_millis(20);
-const SWORD_SHADOW_3_DELAY: Duration = Duration::from_millis(30);
-const SWORD_SHADOW_4_DELAY: Duration = Duration::from_millis(40);
-const SWORD_SHADOW_5_DELAY: Duration = Duration::from_millis(50);
+const SWORD_SHADOW_DELAYS_AND_ALPHAS: [(Duration, f32); 10] = [
+    (Duration::from_millis(5), 0.50),
+    (Duration::from_millis(10), 0.45),
+    (Duration::from_millis(15), 0.40),
+    (Duration::from_millis(20), 0.35),
+    (Duration::from_millis(25), 0.30),
+    (Duration::from_millis(30), 0.25),
+    (Duration::from_millis(35), 0.20),
+    (Duration::from_millis(40), 0.15),
+    (Duration::from_millis(45), 0.10),
+    (Duration::from_millis(50), 0.05),
+];
 
 const SWORD_START_SCALE: Vec3 = Vec3::new(1.0, 0.0, 1.0);
 const SWORD_END_SCALE: Vec3 = Vec3::ONE;
@@ -531,80 +538,33 @@ fn game_setup(
         send_attack_done_event: false,
     };
 
-    let sword_shadow_1_swing_params = SwordAnimationParams {
-        start_delay: SWORD_SHADOW_1_DELAY,
-        start_scale: SWORD_START_SCALE,
-        end_scale: SWORD_END_SCALE,
-        swing_time: SWORD_ANIMATION_TIME,
-        start_rotation: SWORD_START_ROTATION,
-        end_rotation: SWORD_END_ROTATION,
-        start_translation: SWORD_START_TRANSLATION,
-        end_translation: SWORD_END_TRANSLATION,
-        send_swing_complete_event: false,
-        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_1_DELAY,
-        put_away_time: SWORD_PUT_AWAY_TIME,
-        send_attack_done_event: false,
-    };
+    let mut sword_shadow_swing_params = SWORD_SHADOW_DELAYS_AND_ALPHAS
+        .iter()
+        .map(|(delay, alpha)| {
+            (
+                SwordAnimationParams {
+                    start_delay: *delay,
+                    start_scale: SWORD_START_SCALE,
+                    end_scale: SWORD_END_SCALE,
+                    swing_time: SWORD_ANIMATION_TIME,
+                    start_rotation: SWORD_START_ROTATION,
+                    end_rotation: SWORD_END_ROTATION,
+                    start_translation: SWORD_START_TRANSLATION,
+                    end_translation: SWORD_END_TRANSLATION,
+                    send_swing_complete_event: false,
+                    swing_end_delay: SWORD_ANIMATION_END_DELAY - *delay,
+                    put_away_time: SWORD_PUT_AWAY_TIME,
+                    send_attack_done_event: false,
+                },
+                *alpha,
+            )
+        })
+        .collect::<Vec<(SwordAnimationParams, f32)>>();
 
-    let sword_shadow_2_swing_params = SwordAnimationParams {
-        start_delay: SWORD_SHADOW_2_DELAY,
-        start_scale: SWORD_START_SCALE,
-        end_scale: SWORD_END_SCALE,
-        swing_time: SWORD_ANIMATION_TIME,
-        start_rotation: SWORD_START_ROTATION,
-        end_rotation: SWORD_END_ROTATION,
-        start_translation: SWORD_START_TRANSLATION,
-        end_translation: SWORD_END_TRANSLATION,
-        send_swing_complete_event: false,
-        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_2_DELAY,
-        put_away_time: SWORD_PUT_AWAY_TIME,
-        send_attack_done_event: false,
-    };
-
-    let sword_shadow_3_swing_params = SwordAnimationParams {
-        start_delay: SWORD_SHADOW_3_DELAY,
-        start_scale: SWORD_START_SCALE,
-        end_scale: SWORD_END_SCALE,
-        swing_time: SWORD_ANIMATION_TIME,
-        start_rotation: SWORD_START_ROTATION,
-        end_rotation: SWORD_END_ROTATION,
-        start_translation: SWORD_START_TRANSLATION,
-        end_translation: SWORD_END_TRANSLATION,
-        send_swing_complete_event: false,
-        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_3_DELAY,
-        put_away_time: SWORD_PUT_AWAY_TIME,
-        send_attack_done_event: false,
-    };
-
-    let sword_shadow_4_swing_params = SwordAnimationParams {
-        start_delay: SWORD_SHADOW_4_DELAY,
-        start_scale: SWORD_START_SCALE,
-        end_scale: SWORD_END_SCALE,
-        swing_time: SWORD_ANIMATION_TIME,
-        start_rotation: SWORD_START_ROTATION,
-        end_rotation: SWORD_END_ROTATION,
-        start_translation: SWORD_START_TRANSLATION,
-        end_translation: SWORD_END_TRANSLATION,
-        send_swing_complete_event: false,
-        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_4_DELAY,
-        put_away_time: SWORD_PUT_AWAY_TIME,
-        send_attack_done_event: false,
-    };
-
-    let sword_shadow_5_swing_params = SwordAnimationParams {
-        start_delay: SWORD_SHADOW_4_DELAY,
-        start_scale: SWORD_START_SCALE,
-        end_scale: SWORD_END_SCALE,
-        swing_time: SWORD_ANIMATION_TIME,
-        start_rotation: SWORD_START_ROTATION,
-        end_rotation: SWORD_END_ROTATION,
-        start_translation: SWORD_START_TRANSLATION,
-        end_translation: SWORD_END_TRANSLATION,
-        send_swing_complete_event: true,
-        swing_end_delay: SWORD_ANIMATION_END_DELAY - SWORD_SHADOW_5_DELAY,
-        put_away_time: SWORD_PUT_AWAY_TIME,
-        send_attack_done_event: true,
-    };
+    if let Some(last_params) = sword_shadow_swing_params.last_mut() {
+        last_params.0.send_swing_complete_event = true;
+        last_params.0.send_attack_done_event = true;
+    }
 
     commands
         .spawn(MaterialMesh2dBundle {
@@ -636,45 +596,9 @@ fn game_setup(
         .with_children(|parent| {
             spawn_sword_pivot(parent, &mut meshes, &mut materials, sword_swing_params, 1.0);
 
-            spawn_sword_pivot(
-                parent,
-                &mut meshes,
-                &mut materials,
-                sword_shadow_1_swing_params,
-                0.7,
-            );
-
-            spawn_sword_pivot(
-                parent,
-                &mut meshes,
-                &mut materials,
-                sword_shadow_2_swing_params,
-                0.6,
-            );
-
-            spawn_sword_pivot(
-                parent,
-                &mut meshes,
-                &mut materials,
-                sword_shadow_3_swing_params,
-                0.5,
-            );
-
-            spawn_sword_pivot(
-                parent,
-                &mut meshes,
-                &mut materials,
-                sword_shadow_4_swing_params,
-                0.4,
-            );
-
-            spawn_sword_pivot(
-                parent,
-                &mut meshes,
-                &mut materials,
-                sword_shadow_5_swing_params,
-                0.3,
-            );
+            for (params, alpha) in sword_shadow_swing_params {
+                spawn_sword_pivot(parent, &mut meshes, &mut materials, params, alpha);
+            }
         });
 
     // health display
