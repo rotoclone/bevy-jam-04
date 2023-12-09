@@ -98,10 +98,10 @@ const SPAWN_AREA_BUFFER: f32 = 10.0;
 
 const START_SPAWN_INTERVAL: Duration = Duration::from_millis(1000);
 const SPAWN_INTERVAL_CHANGE_INTERVAL: Duration = Duration::from_secs(5);
-const SPAWN_INTERVAL_CHANGE_MULTIPLIER: f32 = 0.95;
-const MIN_SPAWN_INTERVAL: Duration = Duration::from_millis(10);
+const SPAWN_INTERVAL_CHANGE_MULTIPLIER: f32 = 0.90;
+const MIN_SPAWN_INTERVAL: Duration = Duration::from_millis(5);
 
-const NEXT_LEVEL_XP_MULTIPLIER: f64 = 2.0;
+const NEXT_LEVEL_ADDITIONAL_XP_MULTIPLIER: f64 = 1.5;
 const STARTING_XP_THRESHOLD: u64 = 5;
 const STARTING_HEALTH: u64 = 100;
 
@@ -155,6 +155,7 @@ impl Plugin for GamePlugin {
         .insert_resource(Level {
             current_level: 1,
             current_xp: 0,
+            previous_xp_needed: 0,
             xp_needed: 1,
         })
         .insert_resource(EntitiesToDespawn(Vec::new()));
@@ -199,6 +200,7 @@ fn insert_starting_resources(commands: &mut Commands) {
     commands.insert_resource(Level {
         current_level: 1,
         current_xp: 0,
+        previous_xp_needed: 0,
         xp_needed: STARTING_XP_THRESHOLD,
     });
     commands.insert_resource(Health {
@@ -379,6 +381,7 @@ struct EntitiesToDespawn(Vec<Entity>);
 pub struct Level {
     pub current_level: u64,
     pub current_xp: u64,
+    previous_xp_needed: u64,
     xp_needed: u64,
 }
 
@@ -387,8 +390,11 @@ impl Level {
     fn advance(&mut self) {
         self.current_level += 1;
 
-        let new_xp_needed = self.xp_needed as f64 * NEXT_LEVEL_XP_MULTIPLIER;
-        self.xp_needed = new_xp_needed.round() as u64;
+        let xp_since_last_level = self.xp_needed - self.previous_xp_needed;
+        let additional_xp_needed = xp_since_last_level as f64 * NEXT_LEVEL_ADDITIONAL_XP_MULTIPLIER;
+
+        self.previous_xp_needed = self.xp_needed;
+        self.xp_needed += additional_xp_needed.round() as u64;
     }
 }
 
@@ -421,6 +427,9 @@ struct Player;
 
 #[derive(Component)]
 struct AttackCooldown(Timer);
+
+#[derive(Component)]
+struct MaxSpeed(f32);
 
 #[derive(Component)]
 struct SwordPivot;
@@ -592,6 +601,7 @@ fn game_setup(
         .insert(GravityScale(0.0))
         .insert(Player)
         .insert(Attacking(false))
+        .insert(MaxSpeed(PLAYER_MAX_SPEED))
         .insert(attack_cooldown)
         .with_children(|parent| {
             spawn_sword_pivot(parent, &mut meshes, &mut materials, sword_swing_params, 1.0);
@@ -864,6 +874,7 @@ fn player_movement(
             &mut Velocity,
             &mut Transform,
             &Attacking,
+            &MaxSpeed,
         ),
         With<Player>,
     >,
@@ -882,7 +893,7 @@ fn player_movement(
         return;
     };
 
-    for (mut force, mut velocity, mut transform, attacking) in &mut player_query {
+    for (mut force, mut velocity, mut transform, attacking, max_speed) in &mut player_query {
         // translation
         if keycode.pressed(MOVE_LEFT_KEY) {
             force.force.x = -PLAYER_MOVE_FORCE;
@@ -915,7 +926,7 @@ fn player_movement(
         velocity.angvel = 0.0;
 
         // clamp speed
-        velocity.linvel = velocity.linvel.clamp_length_max(PLAYER_MAX_SPEED);
+        velocity.linvel = velocity.linvel.clamp_length_max(max_speed.0);
     }
 }
 
@@ -1283,7 +1294,7 @@ fn level_up(
         (&mut SwordAnimationParams, &mut Animator<Transform>),
         With<SwordPivot>,
     >,
-    mut player_query: Query<&mut AttackCooldown, With<Player>>,
+    mut player_query: Query<(&mut AttackCooldown, &mut MaxSpeed), With<Player>>,
 ) {
     for event in level_up_events.read() {
         // zoom out a bit
@@ -1300,11 +1311,14 @@ fn level_up(
                 Animator::new(build_sword_animation(&swing_params)).with_state(animator.state);
         }
 
-        // reduce attack cooldown
+        // reduce attack cooldown and increase max speed
         // TODO remove
-        for mut cooldown in player_query.iter_mut() {
+        for (mut cooldown, mut max_speed) in player_query.iter_mut() {
             let new_duration = cooldown.0.duration().mul_f32(0.8);
             cooldown.0.set_duration(new_duration);
+
+            let new_max_speed = max_speed.0 * 1.1;
+            max_speed.0 = new_max_speed;
         }
 
         // display perk chooser
