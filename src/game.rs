@@ -26,7 +26,7 @@ use bevy_tweening::{
 use iyes_progress::{ProgressCounter, ProgressPlugin};
 use rand::{
     distributions::{Distribution, WeightedIndex},
-    seq::SliceRandom,
+    seq::{IteratorRandom, SliceRandom},
     Rng,
 };
 use strum::{EnumIter, IntoEnumIterator};
@@ -98,11 +98,12 @@ const SPAWN_AREA_BUFFER: f32 = 10.0;
 
 const START_SPAWN_INTERVAL: Duration = Duration::from_millis(1000);
 const SPAWN_INTERVAL_CHANGE_INTERVAL: Duration = Duration::from_secs(5);
-const SPAWN_INTERVAL_CHANGE_MULTIPLIER: f32 = 0.90;
+const SPAWN_INTERVAL_CHANGE_MULTIPLIER: f32 = 0.95;
 const MIN_SPAWN_INTERVAL: Duration = Duration::from_millis(5);
 
 const NEXT_LEVEL_ADDITIONAL_XP_MULTIPLIER: f64 = 1.5;
 const STARTING_XP_THRESHOLD: u64 = 5;
+const NUM_PERK_CHOICES: usize = 3;
 const STARTING_HEALTH: u64 = 100;
 
 const MAX_ZOOM_LEVEL: f32 = 1.0;
@@ -285,6 +286,103 @@ fn build_starting_spawn_weights() -> SpawnWeights {
     }
 }
 
+#[derive(PartialEq, Eq, Clone, Copy, EnumIter)]
+enum PerkType {
+    LongerSword,
+    WiderSwordSwing,
+    ShorterAttackCooldown,
+    HigherMaxSpeed,
+    HigherMaxHealth,
+    MorePerks,
+    Heal,
+    UnlockGrenade,
+    LargerGrenadeExplosion,
+    ShorterGrenadeCooldown,
+    UnlockTeleport,
+    ShorterTeleportCooldown,
+    UnlockTeleportExplosion,
+    LargerTeleportExplosion,
+    UnlockHealthRegen,
+    FasterHealthRegen,
+    Retaliate,
+    SlowerEnemies,
+    Invincible,
+}
+
+impl PerkType {
+    /// Chooses a number of random perks, given that the player already has certain perks.
+    fn choose_random_perk_types(amount: usize, existing_perks: &[PerkType]) -> Vec<PerkType> {
+        let has_more_perks = existing_perks.contains(&PerkType::MorePerks);
+        let has_grenade = existing_perks.contains(&PerkType::UnlockGrenade);
+        let has_teleport = existing_perks.contains(&PerkType::UnlockTeleport);
+        let has_teleport_explosion = existing_perks.contains(&PerkType::UnlockTeleportExplosion);
+        let has_health_regen = existing_perks.contains(&PerkType::UnlockHealthRegen);
+        let has_retaliate = existing_perks.contains(&PerkType::Retaliate);
+        let valid_perks = PerkType::iter().filter(|perk_type| match perk_type {
+            PerkType::MorePerks => !has_more_perks,
+            PerkType::UnlockGrenade => !has_grenade,
+            PerkType::LargerGrenadeExplosion => has_grenade,
+            PerkType::ShorterAttackCooldown => has_grenade,
+            PerkType::UnlockTeleport => !has_teleport,
+            PerkType::ShorterTeleportCooldown => has_teleport,
+            PerkType::UnlockTeleportExplosion => has_teleport && !has_teleport_explosion,
+            PerkType::LargerTeleportExplosion => has_teleport_explosion,
+            PerkType::UnlockHealthRegen => !has_health_regen,
+            PerkType::FasterHealthRegen => has_health_regen,
+            PerkType::Retaliate => !has_retaliate,
+            _ => true,
+        });
+
+        let mut rng = rand::thread_rng();
+        valid_perks.choose_multiple(&mut rng, amount)
+    }
+
+    /// Gets the user-facing name and description of this perk type
+    fn get_name_and_description(&self) -> (String, String) {
+        let (name, desc) = match self {
+            PerkType::LongerSword => ("Longer Sword", "Increases sword length by 10%"),
+            PerkType::WiderSwordSwing => ("Wider Swing", "Increases sword swing arc by 10%"),
+            PerkType::ShorterAttackCooldown => {
+                ("Stronger Arms", "Decreases attack cooldown by 10%")
+            }
+            PerkType::HigherMaxSpeed => ("Stronger Legs", "Increases max run speed by 10%"),
+            PerkType::HigherMaxHealth => ("Endurance", "Increases max health by 10%"),
+            PerkType::MorePerks => (
+                "Choosy",
+                "Increases the number of perks to choose from each level by 1",
+            ),
+            PerkType::Heal => ("Second Wind", "Heals you to full health"),
+            PerkType::UnlockGrenade => (
+                "Secondary action: Grenade",
+                "Allows you to throw grenades that do damage in an area. Replaces any existing secondary action you have.",
+            ),
+            PerkType::LargerGrenadeExplosion => (
+                "Larger Grenades",
+                "Increases grenade explosion radius by 10%",
+            ),
+            PerkType::ShorterGrenadeCooldown => {
+                ("More Grenades", "Decreases grenade throw cooldown by 10%")
+            }
+            PerkType::UnlockTeleport => (
+                "Secondary action: Teleport",
+                "Allows you to teleport to the mouse cursor. Replaces any existing secondary action you have.",
+            ),
+            PerkType::ShorterTeleportCooldown => {
+                ("More Teleporting", "Decreases the teleport cooldown by 10%")
+            }
+            PerkType::UnlockTeleportExplosion => ("Violent Teleportation", "When you teleport somewhere, you cause an explosion that kills enemies near your destination"),
+            PerkType::LargerTeleportExplosion => ("More Violent Teleportation", "Increases teleportation explosion radius by 10%"),
+            PerkType::UnlockHealthRegen => ("Resilient", "You will slowly regenerate health"),
+            PerkType::FasterHealthRegen => ("More Resilient", "Increases health regeneration rate by 10%"),
+            PerkType::Retaliate => ("Retaliation", "When an enemy hits you, they die"),
+            PerkType::SlowerEnemies => ("Faster Reflexes", "All enemies move 5% slower"),
+            PerkType::Invincible => ("Mind Over Matter", "Makes you invincible for a short period of time"),
+        };
+
+        (name.to_string(), desc.to_string())
+    }
+}
+
 #[derive(AssetCollection, Resource)]
 pub struct ImageAssets {
     #[asset(path = "images/bg.png")]
@@ -432,6 +530,20 @@ struct AttackCooldown(Timer);
 struct MaxSpeed(f32);
 
 #[derive(Component)]
+struct Perks(Vec<PerkType>);
+
+impl Perks {
+    /// Determines the number of perks to choose from on level up
+    fn get_num_perk_choices(&self) -> usize {
+        if self.0.contains(&PerkType::MorePerks) {
+            NUM_PERK_CHOICES + 1
+        } else {
+            NUM_PERK_CHOICES
+        }
+    }
+}
+
+#[derive(Component)]
 struct SwordPivot;
 
 #[derive(Component)]
@@ -528,7 +640,6 @@ fn game_setup(
         })
         .insert(GameComponent);
 
-    // player
     let mut attack_cooldown = AttackCooldown(Timer::new(PLAYER_ATTACK_COOLDOWN, TimerMode::Once));
     attack_cooldown.0.set_elapsed(PLAYER_ATTACK_COOLDOWN);
 
@@ -575,6 +686,7 @@ fn game_setup(
         last_params.0.send_attack_done_event = true;
     }
 
+    // player
     commands
         .spawn(MaterialMesh2dBundle {
             mesh: meshes.add(shape::Circle::new(PLAYER_SIZE).into()).into(),
@@ -602,6 +714,7 @@ fn game_setup(
         .insert(Player)
         .insert(Attacking(false))
         .insert(MaxSpeed(PLAYER_MAX_SPEED))
+        .insert(Perks(Vec::new()))
         .insert(attack_cooldown)
         .with_children(|parent| {
             spawn_sword_pivot(parent, &mut meshes, &mut materials, sword_swing_params, 1.0);
@@ -832,7 +945,7 @@ fn spawn_sword_pivot(
                     transform: Transform::from_translation(Vec3::new(0., SWORD_LENGTH / 2.0, 0.)),
                     ..default()
                 })
-                .insert(Collider::cuboid(SWORD_WIDTH / 2.0, SWORD_LENGTH / 2.0))
+                .insert(Collider::cuboid(SWORD_WIDTH, SWORD_LENGTH / 2.0))
                 .insert(Sensor)
                 .insert(Sword { active: false });
         });
@@ -1294,7 +1407,7 @@ fn level_up(
         (&mut SwordAnimationParams, &mut Animator<Transform>),
         With<SwordPivot>,
     >,
-    mut player_query: Query<(&mut AttackCooldown, &mut MaxSpeed), With<Player>>,
+    mut player_query: Query<(&mut AttackCooldown, &mut MaxSpeed, &Perks), With<Player>>,
 ) {
     for event in level_up_events.read() {
         // zoom out a bit
@@ -1313,16 +1426,22 @@ fn level_up(
 
         // reduce attack cooldown and increase max speed
         // TODO remove
-        for (mut cooldown, mut max_speed) in player_query.iter_mut() {
+        /*
+        for (mut cooldown, mut max_speed, perks) in player_query.iter_mut() {
             let new_duration = cooldown.0.duration().mul_f32(0.8);
             cooldown.0.set_duration(new_duration);
 
             let new_max_speed = max_speed.0 * 1.1;
             max_speed.0 = new_max_speed;
         }
+        */
 
         // display perk chooser
-        //TODO
+        for (mut cooldown, mut max_speed, perks) in player_query.iter_mut() {
+            let num_perk_choices = perks.get_num_perk_choices();
+            let available_perks = PerkType::choose_random_perk_types(num_perk_choices, &perks.0);
+            //TODO
+        }
     }
 }
 
