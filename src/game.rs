@@ -284,9 +284,9 @@ fn build_starting_spawn_weights() -> SpawnWeights {
     let mut type_to_index = HashMap::new();
     for (i, enemy_type) in EnemyType::iter().enumerate() {
         let weight = match enemy_type {
-            EnemyType::Regular => 30,
-            EnemyType::SmallAndFast => 5,
-            EnemyType::BigAndSlow => 5,
+            EnemyType::Regular => 50,
+            EnemyType::SmallAndFast => 10,
+            EnemyType::BigAndSlow => 10,
             EnemyType::UltraBigAndSlow => 0,
             EnemyType::Assassin => 0,
             EnemyType::UltraAssassin => 0,
@@ -1099,22 +1099,38 @@ fn keep_player_in_bounds(mut player_query: Query<&mut Transform, With<Player>>) 
 
 /// Makes the player attack
 fn player_attack(
-    mut player_query: Query<(&mut AttackCooldown, &mut Attacking), With<Player>>,
-    mut sword_pivot_query: Query<(&mut Animator<Transform>, &mut Transform), With<SwordPivot>>,
+    mut player_query: Query<(&mut AttackCooldown, &mut Attacking, &mut Transform), With<Player>>,
+    mut sword_pivot_query: Query<&mut Animator<Transform>, With<SwordPivot>>,
     mut sword_query: Query<&mut Sword>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    window_query: Query<&Window>,
 ) {
-    for (mut cooldown, mut attacking) in player_query.iter_mut() {
+    let (camera, camera_transform) = camera_query.single();
+    let Some(cursor_position) = window_query.single().cursor_position() else {
+        return;
+    };
+    // Calculate a world position based on the cursor's position.
+    let Some(cursor_world_position) =
+        camera.viewport_to_world_2d(camera_transform, cursor_position)
+    else {
+        return;
+    };
+
+    for (mut cooldown, mut attacking, mut player_transform) in player_query.iter_mut() {
         if !cooldown.0.finished() {
             continue;
         }
 
-        //TODO only animate the sword for this particular player somehow
-        for (mut animator, mut transform) in sword_pivot_query.iter_mut() {
+        for mut animator in sword_pivot_query.iter_mut() {
             animator.stop();
 
-            transform.scale = SWORD_START_SCALE;
-            transform.rotation.z = SWORD_START_ROTATION;
-            transform.translation = SWORD_START_TRANSLATION;
+            // rotate player to cursor so you can still rotate between rapid attacks
+            if let Some(to_cursor) =
+                (cursor_world_position - player_transform.translation.xy()).try_normalize()
+            {
+                let rotate_to_cursor = Quat::from_rotation_arc(Vec3::Y, to_cursor.extend(0.));
+                player_transform.rotation = rotate_to_cursor;
+            }
 
             attacking.0 = true;
 
