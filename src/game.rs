@@ -1,4 +1,4 @@
-use std::{f32::consts::PI, ops::RangeInclusive, time::Duration};
+use std::{collections::HashMap, f32::consts::PI, ops::RangeInclusive, time::Duration};
 
 use bevy::{
     audio::{Volume, VolumeLevel},
@@ -101,6 +101,14 @@ const SPAWN_INTERVAL_CHANGE_INTERVAL: Duration = Duration::from_secs(5);
 const SPAWN_INTERVAL_CHANGE_MULTIPLIER: f32 = 0.95;
 const MIN_SPAWN_INTERVAL: Duration = Duration::from_millis(5);
 
+const SPAWN_WEIGHTS_CHANGE_INTERVAL: Duration = Duration::from_secs(5);
+const SPAWN_WEIGHT_CHANGES: [EnemyType; 4] = [
+    EnemyType::Assassin,
+    EnemyType::Assassin,
+    EnemyType::UltraBigAndSlow,
+    EnemyType::UltraAssassin,
+];
+
 const NEXT_LEVEL_ADDITIONAL_XP_MULTIPLIER: f64 = 1.5;
 const STARTING_XP_THRESHOLD: u64 = 5;
 const NUM_PERK_CHOICES: usize = 3;
@@ -172,6 +180,7 @@ impl Plugin for GamePlugin {
                     move_camera.after(player_movement),
                     keep_player_in_bounds.after(player_movement),
                     spawn_enemies.run_if(in_state(GameState::Game)),
+                    change_spawn_weights.run_if(in_state(GameState::Game)),
                     move_enemies,
                     collisions.run_if(in_state(GameState::Game)),
                     update_level_display
@@ -195,6 +204,10 @@ fn insert_starting_resources(commands: &mut Commands) {
     commands.insert_resource(ZoomLevel(STARTING_ZOOM_LEVEL));
     commands.insert_resource(build_starting_spawn_timer());
     commands.insert_resource(build_starting_spawn_interval_change_timer());
+    commands.insert_resource(SpawnWeightsChangeTimer(Timer::new(
+        SPAWN_WEIGHTS_CHANGE_INTERVAL,
+        TimerMode::Repeating,
+    )));
     commands.insert_resource(build_spawn_areas());
     commands.insert_resource(build_starting_spawn_weights());
     commands.insert_resource(EntitiesToDespawn(Vec::new()));
@@ -268,21 +281,27 @@ fn build_starting_spawn_interval_change_timer() -> SpawnIntervalChangeTimer {
 fn build_starting_spawn_weights() -> SpawnWeights {
     let mut types = Vec::new();
     let mut weights = Vec::new();
-    for enemy_type in EnemyType::iter() {
+    let mut type_to_index = HashMap::new();
+    for (i, enemy_type) in EnemyType::iter().enumerate() {
         let weight = match enemy_type {
-            EnemyType::Regular => 0.55,
-            EnemyType::SmallAndFast => 0.2,
-            EnemyType::BigAndSlow => 0.2,
-            EnemyType::Assassin => 0.05,
+            EnemyType::Regular => 30,
+            EnemyType::SmallAndFast => 5,
+            EnemyType::BigAndSlow => 5,
+            EnemyType::UltraBigAndSlow => 0,
+            EnemyType::Assassin => 0,
+            EnemyType::UltraAssassin => 0,
         };
         types.push(enemy_type);
         weights.push(weight);
+        type_to_index.insert(enemy_type, i);
     }
 
     SpawnWeights {
         types,
         weights: weights.clone(),
+        type_to_index,
         dist: WeightedIndex::new(weights).expect("weights should be valid"),
+        next_weight_to_increase: 0,
     }
 }
 
@@ -404,6 +423,9 @@ struct SpawnTimer(Timer);
 struct SpawnIntervalChangeTimer(Timer);
 
 #[derive(Resource)]
+struct SpawnWeightsChangeTimer(Timer);
+
+#[derive(Resource)]
 struct SpawnAreas(Vec<Rect>);
 
 struct EnemyParams {
@@ -419,7 +441,9 @@ enum EnemyType {
     Regular,
     SmallAndFast,
     BigAndSlow,
+    UltraBigAndSlow,
     Assassin,
+    UltraAssassin,
 }
 
 impl EnemyType {
@@ -435,7 +459,7 @@ impl EnemyType {
             },
             EnemyType::SmallAndFast => EnemyParams {
                 color: Color::SEA_GREEN,
-                size: 2.0..=2.0,
+                size: 2.5..=2.5,
                 max_speed: 50.0..=70.0,
                 damage: 3,
                 xp_reward: 1,
@@ -447,12 +471,26 @@ impl EnemyType {
                 damage: 10,
                 xp_reward: 1,
             },
+            EnemyType::UltraBigAndSlow => EnemyParams {
+                color: Color::PINK,
+                size: 8.0..=8.0,
+                max_speed: 20.0..=30.0,
+                damage: 25,
+                xp_reward: 3,
+            },
             EnemyType::Assassin => EnemyParams {
-                color: Color::ANTIQUE_WHITE,
+                color: Color::AQUAMARINE,
                 size: 3.0..=3.0,
                 max_speed: 70.0..=90.0,
                 damage: 15,
                 xp_reward: 2,
+            },
+            EnemyType::UltraAssassin => EnemyParams {
+                color: Color::WHITE,
+                size: 3.0..=3.0,
+                max_speed: 100.0..=120.0,
+                damage: 15,
+                xp_reward: 3,
             },
         }
     }
@@ -461,8 +499,10 @@ impl EnemyType {
 #[derive(Resource)]
 struct SpawnWeights {
     types: Vec<EnemyType>,
-    weights: Vec<f32>,
-    dist: WeightedIndex<f32>,
+    weights: Vec<u32>,
+    type_to_index: HashMap<EnemyType, usize>,
+    dist: WeightedIndex<u32>,
+    next_weight_to_increase: usize,
 }
 
 impl SpawnWeights {
@@ -1224,6 +1264,29 @@ fn spawn_enemy(
             xp_reward: params.xp_reward,
             max_speed: rng.gen_range(params.max_speed),
         });
+}
+
+/// Handles changing spawn weights over time
+fn change_spawn_weights(
+    mut spawn_weights_change_timer: ResMut<SpawnWeightsChangeTimer>,
+    mut spawn_weights: ResMut<SpawnWeights>,
+    time: Res<Time>,
+) {
+    spawn_weights_change_timer.0.tick(time.delta());
+
+    if spawn_weights_change_timer.0.just_finished() {
+        let weight_to_increase = SPAWN_WEIGHT_CHANGES[spawn_weights.next_weight_to_increase];
+        spawn_weights.next_weight_to_increase =
+            (spawn_weights.next_weight_to_increase + 1) % SPAWN_WEIGHT_CHANGES.len();
+
+        let weight_index = spawn_weights.type_to_index[&weight_to_increase];
+        spawn_weights.weights[weight_index] += 1;
+        let new_weight = spawn_weights.weights[weight_index];
+        spawn_weights
+            .dist
+            .update_weights(&[(weight_index, &new_weight)])
+            .expect("weights should be valid");
+    }
 }
 
 /// Handles moving enemies
