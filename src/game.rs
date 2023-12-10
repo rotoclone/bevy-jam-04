@@ -1,9 +1,14 @@
-use std::{collections::HashMap, f32::consts::PI, ops::RangeInclusive, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    f32::consts::PI,
+    ops::RangeInclusive,
+    time::Duration,
+};
 
 use bevy::{
     audio::{Volume, VolumeLevel},
     ecs::query::WorldQuery,
-    input::common_conditions::input_pressed,
+    input::common_conditions::{input_just_pressed, input_pressed},
     sprite::MaterialMesh2dBundle,
 };
 use bevy_asset_loader::{
@@ -96,7 +101,7 @@ const PLAY_AREA_SIZE: Vec2 = Vec2::new(1000.0, 1000.0);
 const SPAWN_AREA_DEPTH: f32 = 25.0;
 const SPAWN_AREA_BUFFER: f32 = 10.0;
 
-const START_SPAWN_INTERVAL: Duration = Duration::from_millis(1000);
+const START_SPAWN_INTERVAL: Duration = Duration::from_millis(500);
 const SPAWN_INTERVAL_CHANGE_INTERVAL: Duration = Duration::from_secs(5);
 const SPAWN_INTERVAL_CHANGE_MULTIPLIER: f32 = 0.95;
 const MIN_SPAWN_INTERVAL: Duration = Duration::from_millis(5);
@@ -122,6 +127,7 @@ const MOVE_RIGHT_KEY: KeyCode = KeyCode::D;
 const MOVE_UP_KEY: KeyCode = KeyCode::W;
 const MOVE_DOWN_KEY: KeyCode = KeyCode::S;
 const ATTACK_INPUT: MouseButton = MouseButton::Left;
+const PAUSE_INPUT: KeyCode = KeyCode::P;
 
 const BG_MUSIC_VOLUME: f32 = 0.5;
 
@@ -167,7 +173,8 @@ impl Plugin for GamePlugin {
             previous_xp_needed: 0,
             xp_needed: 1,
         })
-        .insert_resource(EntitiesToDespawn(Vec::new()));
+        .insert_resource(EntitiesToDespawn(Vec::new()))
+        .insert_resource(AvailablePerks(Vec::new()));
 
         app.add_event::<LevelUp>()
             .add_systems(
@@ -193,6 +200,8 @@ impl Plugin for GamePlugin {
                     slow_mo.run_if(in_state(GameState::Game)),
                     check_for_death.run_if(resource_changed::<Health>()),
                     level_up.after(update_level_display),
+                    toggle_pause.run_if(input_just_pressed(PAUSE_INPUT)),
+                    choose_perk,
                 ),
             )
             .add_systems(PostUpdate, despawn_entities);
@@ -221,6 +230,7 @@ fn insert_starting_resources(commands: &mut Commands) {
         current_health: STARTING_HEALTH,
         max_health: STARTING_HEALTH,
     });
+    commands.insert_resource(AvailablePerks(Vec::new()));
 
     let mut slow_mo_timer = Timer::new(HIT_SLOW_MO_TIME, TimerMode::Once);
     slow_mo_timer.pause();
@@ -305,7 +315,7 @@ fn build_starting_spawn_weights() -> SpawnWeights {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, EnumIter)]
+#[derive(PartialEq, Eq, Clone, Copy, Hash, EnumIter)]
 enum PerkType {
     LongerSword,
     WiderSwordSwing,
@@ -330,7 +340,10 @@ enum PerkType {
 
 impl PerkType {
     /// Chooses a number of random perks, given that the player already has certain perks.
-    fn choose_random_perk_types(amount: usize, existing_perks: &[PerkType]) -> Vec<PerkType> {
+    fn choose_random_perk_types(
+        amount: usize,
+        existing_perks: &HashSet<PerkType>,
+    ) -> Vec<PerkType> {
         let has_more_perks = existing_perks.contains(&PerkType::MorePerks);
         let has_grenade = existing_perks.contains(&PerkType::UnlockGrenade);
         let has_teleport = existing_perks.contains(&PerkType::UnlockTeleport);
@@ -359,7 +372,7 @@ impl PerkType {
     /// Gets the user-facing name and description of this perk type
     fn get_name_and_description(&self) -> (String, String) {
         let (name, desc) = match self {
-            PerkType::LongerSword => ("Longer Sword", "Increases sword length by 10%"),
+            PerkType::LongerSword => ("Reach", "Increases sword length by 10%"),
             PerkType::WiderSwordSwing => ("Wider Swing", "Increases sword swing arc by 10%"),
             PerkType::ShorterAttackCooldown => {
                 ("Stronger Arms", "Decreases attack cooldown by 10%")
@@ -453,42 +466,42 @@ impl EnemyType {
             EnemyType::Regular => EnemyParams {
                 color: Color::RED,
                 size: 4.0..=4.0,
-                max_speed: 30.0..=50.0,
+                max_speed: 15.0..=25.0,
                 damage: 5,
                 xp_reward: 1,
             },
             EnemyType::SmallAndFast => EnemyParams {
                 color: Color::SEA_GREEN,
                 size: 2.5..=2.5,
-                max_speed: 50.0..=70.0,
+                max_speed: 25.0..=35.0,
                 damage: 3,
                 xp_reward: 1,
             },
             EnemyType::BigAndSlow => EnemyParams {
                 color: Color::ORANGE_RED,
                 size: 7.0..=7.0,
-                max_speed: 10.0..=30.0,
+                max_speed: 5.0..=15.0,
                 damage: 10,
                 xp_reward: 1,
             },
             EnemyType::UltraBigAndSlow => EnemyParams {
                 color: Color::PINK,
                 size: 8.0..=8.0,
-                max_speed: 20.0..=30.0,
+                max_speed: 10.0..=15.0,
                 damage: 25,
                 xp_reward: 3,
             },
             EnemyType::Assassin => EnemyParams {
                 color: Color::AQUAMARINE,
                 size: 3.0..=3.0,
-                max_speed: 70.0..=90.0,
+                max_speed: 40.0..=50.0,
                 damage: 15,
                 xp_reward: 2,
             },
             EnemyType::UltraAssassin => EnemyParams {
                 color: Color::WHITE,
                 size: 3.0..=3.0,
-                max_speed: 100.0..=120.0,
+                max_speed: 70.0..=80.0,
                 damage: 15,
                 xp_reward: 3,
             },
@@ -548,6 +561,9 @@ struct SlowMoTimer {
     timer: Timer,
 }
 
+#[derive(Resource)]
+struct AvailablePerks(Vec<PerkType>);
+
 #[derive(Component)]
 struct LoadingComponent;
 
@@ -570,7 +586,7 @@ struct AttackCooldown(Timer);
 struct MaxSpeed(f32);
 
 #[derive(Component)]
-struct Perks(Vec<PerkType>);
+struct Perks(HashSet<PerkType>);
 
 impl Perks {
     /// Determines the number of perks to choose from on level up
@@ -612,6 +628,15 @@ struct EnemyCountText;
 
 #[derive(Component)]
 struct HealthText;
+
+#[derive(Component)]
+struct PerkChooser;
+
+#[derive(Component)]
+struct ChoosePerkButton(usize);
+
+#[derive(Component)]
+struct PerkText(usize);
 
 #[derive(Event)]
 struct LevelUp {
@@ -754,7 +779,7 @@ fn game_setup(
         .insert(Player)
         .insert(Attacking(false))
         .insert(MaxSpeed(PLAYER_MAX_SPEED))
-        .insert(Perks(Vec::new()))
+        .insert(Perks(HashSet::new()))
         .insert(attack_cooldown)
         .with_children(|parent| {
             spawn_sword_pivot(parent, &mut meshes, &mut materials, sword_swing_params, 1.0);
@@ -886,6 +911,47 @@ fn game_setup(
                 )
                 .insert(EnemyCountText);
         });
+
+    // perk chooser
+    commands
+        .spawn(NodeBundle {
+            style: Style {
+                width: Val::Percent(80.0),
+                height: Val::Percent(80.0),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                margin: UiRect::all(Val::Auto),
+                ..default()
+            },
+            background_color: BackgroundColor(Color::BLACK.with_a(0.8)),
+            visibility: Visibility::Hidden,
+            ..default()
+        })
+        .insert(GameComponent)
+        .insert(PerkChooser)
+        .with_children(|parent| {
+            // text
+            parent.spawn(
+                TextBundle::from_section(
+                    "You grow stronger.",
+                    TextStyle {
+                        font: asset_server.load(MAIN_FONT),
+                        font_size: 50.0,
+                        color: Color::WHITE,
+                    },
+                )
+                .with_text_alignment(TextAlignment::Center)
+                .with_style(Style {
+                    margin: UiRect::bottom(Val::Px(5.0)),
+                    ..default()
+                }),
+            );
+
+            spawn_perk_chooser_button(0, parent, &asset_server);
+            spawn_perk_chooser_button(1, parent, &asset_server);
+            spawn_perk_chooser_button(2, parent, &asset_server);
+        });
 }
 
 #[derive(Component)]
@@ -988,6 +1054,74 @@ fn spawn_sword_pivot(
                 .insert(Collider::cuboid(SWORD_WIDTH, SWORD_LENGTH / 2.0))
                 .insert(Sensor)
                 .insert(Sword { active: false });
+        });
+}
+
+/// Spawns a perk chooser button with the provided index
+fn spawn_perk_chooser_button(
+    index: usize,
+    parent: &mut ChildBuilder,
+    asset_server: &Res<AssetServer>,
+) {
+    parent
+        .spawn(NodeBundle {
+            style: Style {
+                // center button
+                width: Val::Percent(100.00),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                padding: UiRect::all(Val::Px(10.0)),
+                ..default()
+            },
+            ..default()
+        })
+        .with_children(|parent| {
+            parent
+                .spawn(ButtonBundle {
+                    style: Style {
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        padding: UiRect::all(Val::Px(15.0)),
+                        width: Val::Percent(100.0),
+                        ..default()
+                    },
+                    background_color: NORMAL_BUTTON.into(),
+                    ..default()
+                })
+                .insert(ChoosePerkButton(index))
+                .with_children(|parent| {
+                    parent
+                        .spawn(
+                            TextBundle::from_sections([
+                                TextSection::new(
+                                    "perk name",
+                                    TextStyle {
+                                        font: asset_server.load(MAIN_FONT),
+                                        font_size: 40.0,
+                                        color: NORMAL_BUTTON_TEXT_COLOR,
+                                    },
+                                ),
+                                TextSection::new(
+                                    "\n",
+                                    TextStyle {
+                                        font: asset_server.load(MAIN_FONT),
+                                        font_size: 30.0,
+                                        color: NORMAL_BUTTON_TEXT_COLOR,
+                                    },
+                                ),
+                                TextSection::new(
+                                    "perk description",
+                                    TextStyle {
+                                        font: asset_server.load(MAIN_FONT),
+                                        font_size: 30.0,
+                                        color: NORMAL_BUTTON_TEXT_COLOR,
+                                    },
+                                ),
+                            ])
+                            .with_text_alignment(TextAlignment::Center),
+                        )
+                        .insert(PerkText(index));
+                });
         });
 }
 
@@ -1482,26 +1616,16 @@ fn slow_mo(mut timer: ResMut<SlowMoTimer>, mut time: ResMut<Time<Virtual>>) {
 fn level_up(
     mut level_up_events: EventReader<LevelUp>,
     mut zoom: ResMut<ZoomLevel>,
-    mut sword_pivot_query: Query<
-        (&mut SwordAnimationParams, &mut Animator<Transform>),
-        With<SwordPivot>,
-    >,
+    mut time: ResMut<Time<Virtual>>,
     mut player_query: Query<(&mut AttackCooldown, &mut MaxSpeed, &Perks), With<Player>>,
+    mut perk_chooser_query: Query<&mut Visibility, With<PerkChooser>>,
+    mut perk_text_query: Query<(&mut Text, &PerkText)>,
+    mut available_perks: ResMut<AvailablePerks>,
 ) {
     for event in level_up_events.read() {
         // zoom out a bit
         let new_zoom = MAX_ZOOM_LEVEL.min(zoom.0 * ZOOM_LEVEL_MULTIPLIER);
         zoom.0 = new_zoom;
-
-        // make sword longer and swing wider
-        // TODO remove
-        for (mut swing_params, mut animator) in sword_pivot_query.iter_mut() {
-            swing_params.end_scale.y *= 1.1;
-            swing_params.start_rotation *= 1.1;
-            swing_params.end_rotation *= 1.1;
-            *animator =
-                Animator::new(build_sword_animation(&swing_params)).with_state(animator.state);
-        }
 
         // reduce attack cooldown and increase max speed
         // TODO remove
@@ -1515,11 +1639,22 @@ fn level_up(
         }
         */
 
+        // pause the game
+        time.pause();
+
         // display perk chooser
         for (mut cooldown, mut max_speed, perks) in player_query.iter_mut() {
             let num_perk_choices = perks.get_num_perk_choices();
-            let available_perks = PerkType::choose_random_perk_types(num_perk_choices, &perks.0);
-            //TODO
+            available_perks.0 = PerkType::choose_random_perk_types(num_perk_choices, &perks.0);
+            for (mut text, perk_text) in perk_text_query.iter_mut() {
+                let (name, desc) = available_perks.0[perk_text.0].get_name_and_description();
+                text.sections[0].value = name;
+                text.sections[2].value = desc;
+            }
+        }
+
+        for mut visibility in perk_chooser_query.iter_mut() {
+            *visibility = Visibility::Inherited;
         }
     }
 }
@@ -1528,6 +1663,69 @@ fn level_up(
 fn check_for_death(mut next_state: ResMut<NextState<GameState>>, health: Res<Health>) {
     if health.current_health == 0 {
         next_state.set(GameState::GameOver);
+    }
+}
+
+/// Handles pausing and unpausing the game
+fn toggle_pause(mut time: ResMut<Time<Virtual>>) {
+    if time.is_paused() {
+        time.unpause();
+    } else {
+        time.pause();
+    }
+}
+
+/// Handles interactions with the perk chooser buttons.
+fn choose_perk(
+    mut time: ResMut<Time<Virtual>>,
+    interaction_query: Query<(&Interaction, &ChoosePerkButton), Changed<Interaction>>,
+    mut perk_chooser_query: Query<&mut Visibility, With<PerkChooser>>,
+    available_perks: Res<AvailablePerks>,
+    mut player_query: Query<(&mut AttackCooldown, &mut MaxSpeed, &mut Perks), With<Player>>,
+    mut sword_pivot_query: Query<
+        (&mut SwordAnimationParams, &mut Animator<Transform>),
+        With<SwordPivot>,
+    >,
+    mut health: ResMut<Health>,
+) {
+    for (interaction, button) in interaction_query.iter() {
+        if *interaction == Interaction::Pressed {
+            let chosen_perk = available_perks.0[button.0];
+
+            for (mut cooldown, mut max_speed, mut perks) in player_query.iter_mut() {
+                match chosen_perk {
+                    PerkType::LongerSword => activate_longer_sword(&mut sword_pivot_query),
+                    PerkType::WiderSwordSwing => activate_wider_sword_swing(&mut sword_pivot_query),
+                    PerkType::ShorterAttackCooldown => {
+                        activate_shorter_attack_cooldown(&mut cooldown)
+                    }
+                    PerkType::HigherMaxSpeed => activate_higher_max_speed(&mut max_speed),
+                    PerkType::HigherMaxHealth => activate_higher_max_health(&mut health),
+                    PerkType::MorePerks => activate_more_perks(),
+                    PerkType::Heal => activate_heal(&mut health),
+                    PerkType::UnlockGrenade => activate_unlock_grenade(),
+                    PerkType::LargerGrenadeExplosion => activate_larger_grenade_explosion(),
+                    PerkType::ShorterGrenadeCooldown => activate_shorter_grenade_cooldown(),
+                    PerkType::UnlockTeleport => activate_teleport(),
+                    PerkType::ShorterTeleportCooldown => activate_shorter_teleport_cooldown(),
+                    PerkType::UnlockTeleportExplosion => activate_unlock_teleport_explosion(),
+                    PerkType::LargerTeleportExplosion => activate_larger_teleport_explosion(),
+                    PerkType::UnlockHealthRegen => activate_unlock_health_regen(),
+                    PerkType::FasterHealthRegen => activate_faster_health_regen(),
+                    PerkType::Retaliate => activate_retaliate(),
+                    PerkType::SlowerEnemies => activate_slower_enemies(),
+                    PerkType::Invincible => activate_invincible(),
+                }
+
+                perks.0.insert(chosen_perk);
+            }
+
+            for mut visibility in perk_chooser_query.iter_mut() {
+                *visibility = Visibility::Hidden;
+            }
+
+            time.unpause();
+        }
     }
 }
 
@@ -1550,4 +1748,107 @@ fn stop_background_music(music_controller: Query<&AudioSink, With<BackgroundMusi
     if let Ok(sink) = music_controller.get_single() {
         sink.stop();
     }
+}
+
+//
+// perk activation functions
+//
+
+fn activate_longer_sword(
+    sword_pivot_query: &mut Query<
+        (&mut SwordAnimationParams, &mut Animator<Transform>),
+        With<SwordPivot>,
+    >,
+) {
+    for (mut swing_params, mut animator) in sword_pivot_query.iter_mut() {
+        swing_params.end_scale.y *= 1.1;
+        *animator = Animator::new(build_sword_animation(&swing_params)).with_state(animator.state);
+    }
+}
+
+fn activate_wider_sword_swing(
+    sword_pivot_query: &mut Query<
+        (&mut SwordAnimationParams, &mut Animator<Transform>),
+        With<SwordPivot>,
+    >,
+) {
+    for (mut swing_params, mut animator) in sword_pivot_query.iter_mut() {
+        swing_params.start_rotation *= 1.05;
+        swing_params.end_rotation *= 1.05;
+        *animator = Animator::new(build_sword_animation(&swing_params)).with_state(animator.state);
+    }
+}
+
+fn activate_shorter_attack_cooldown(cooldown: &mut AttackCooldown) {
+    let new_duration = cooldown.0.duration().mul_f32(0.9);
+    cooldown.0.set_duration(new_duration);
+}
+
+fn activate_higher_max_speed(max_speed: &mut MaxSpeed) {
+    let new_max_speed = max_speed.0 * 1.1;
+    max_speed.0 = new_max_speed;
+}
+
+fn activate_higher_max_health(health: &mut Health) {
+    let current_health_fraction = health.current_health as f64 / health.max_health as f64;
+    let new_max_health = health.max_health as f64 * 1.1;
+    let new_current_health = new_max_health * current_health_fraction;
+    health.max_health = new_max_health.round() as u64;
+    health.current_health = new_current_health.round() as u64;
+}
+
+fn activate_more_perks() {
+    //TODO
+}
+
+fn activate_heal(health: &mut Health) {
+    health.current_health = health.max_health;
+}
+
+fn activate_unlock_grenade() {
+    //TODO
+}
+
+fn activate_larger_grenade_explosion() {
+    //TODO
+}
+
+fn activate_shorter_grenade_cooldown() {
+    //TODO
+}
+
+fn activate_teleport() {
+    //TODO
+}
+
+fn activate_shorter_teleport_cooldown() {
+    //TODO
+}
+
+fn activate_unlock_teleport_explosion() {
+    //TODO
+}
+
+fn activate_larger_teleport_explosion() {
+    //TODO
+}
+
+fn activate_unlock_health_regen() {
+    //TODO
+}
+
+fn activate_faster_health_regen() {
+    //TODO
+}
+
+fn activate_retaliate() {
+    //TODO
+}
+
+fn activate_slower_enemies() {
+    //TODO
+}
+
+fn activate_invincible() {
+    //TODO
 }

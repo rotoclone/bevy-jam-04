@@ -19,7 +19,7 @@ use game::*;
 mod game_over;
 use game_over::*;
 
-const DEV_MODE: bool = false;
+const DEV_MODE: bool = true;
 
 const WINDOW_WIDTH: f32 = 1280.0;
 const WINDOW_HEIGHT: f32 = 720.0;

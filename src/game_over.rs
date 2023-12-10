@@ -23,7 +23,7 @@ fn game_over_setup(mut commands: Commands, level: Res<Level>, asset_server: Res<
     let legacy_message = if level.current_level < 4 {
         "You will be forgotten."
     } else if level.current_level < 8 {
-        "Your efforts were not in vain, but you will be forgotten."
+        "You will be remembered, for a time."
     } else if level.current_level < 12 {
         "You will be remembered."
     } else {
