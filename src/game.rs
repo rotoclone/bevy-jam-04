@@ -90,6 +90,7 @@ const SWORD_END_TRANSLATION: Vec3 =
 const SWORD_SWING_COMPLETE_EVENT_ID: u64 = 1;
 const ATTACK_DONE_EVENT_ID: u64 = 2;
 const EXPLOSION_COMPLETE_EVENT_ID: u64 = 3;
+const DEATH_ANIMATION_COMPLETE_EVENT_ID: u64 = 4;
 
 const HIT_SLOW_MO_TIME: Duration = Duration::from_millis(250);
 const HIT_SLOW_MO_TIME_SCALE: f32 = 0.5;
@@ -102,6 +103,8 @@ const EXPLOSION_START_RADIUS: f32 = 6.0;
 const EXPLOSION_DURATION: Duration = Duration::from_millis(250);
 const EXPLOSION_FADE_TIME: Duration = Duration::from_millis(250);
 const EXPLOSION_COLOR: Color = Color::rgba(1.0, 1.0, 0.0, 0.9);
+
+const DEATH_ANIMATION_DURATION: Duration = Duration::from_millis(200);
 
 const PLAY_AREA_SIZE: Vec2 = Vec2::new(1000.0, 1000.0);
 
@@ -141,7 +144,7 @@ const BG_MUSIC_VOLUME: f32 = 0.5;
 const SWING_VOLUME: f32 = 0.4;
 const TELEPORT_VOLUME: f32 = 0.4;
 const EXPLOSION_VOLUME: f32 = 0.5;
-const HIT_VOLUME: f32 = 0.3;
+const HIT_VOLUME: f32 = 0.25;
 const PLAYER_HIT_VOLUME: f32 = 0.6;
 const LEVEL_UP_VOLUME: f32 = 0.6;
 
@@ -682,6 +685,8 @@ struct Enemy {
     damage: u64,
     xp_reward: u64,
     max_speed: f32,
+    size: f32,
+    color: Color,
 }
 
 #[derive(Component)]
@@ -707,6 +712,9 @@ struct PerkText(usize);
 
 #[derive(Component)]
 struct Explosion;
+
+#[derive(Component)]
+struct DeathAnimation;
 
 #[derive(Event)]
 struct LevelUp {
@@ -1207,6 +1215,7 @@ fn tween_completed(
     mut sword_query: Query<&mut Sword>,
     mut player_attacking_query: Query<&mut Attacking, With<Player>>,
     explosions_query: Query<Entity, With<Explosion>>,
+    death_animations_query: Query<Entity, With<DeathAnimation>>,
     mut entities_to_despawn: ResMut<EntitiesToDespawn>,
 ) {
     for ev in reader.read() {
@@ -1224,6 +1233,14 @@ fn tween_completed(
 
         if ev.user_data == EXPLOSION_COMPLETE_EVENT_ID {
             for entity in explosions_query.iter() {
+                if ev.entity == entity {
+                    entities_to_despawn.0.push(entity);
+                }
+            }
+        }
+
+        if ev.user_data == DEATH_ANIMATION_COMPLETE_EVENT_ID {
+            for entity in death_animations_query.iter() {
                 if ev.entity == entity {
                     entities_to_despawn.0.push(entity);
                 }
@@ -1636,6 +1653,8 @@ fn spawn_enemy(
             damage: params.damage,
             xp_reward: params.xp_reward,
             max_speed: rng.gen_range(params.max_speed),
+            size,
+            color: params.color,
         });
 }
 
@@ -1708,6 +1727,8 @@ fn collisions(
     explosion_query: Query<&Explosion>,
     mut commands: Commands,
     audio_assets: Res<AudioAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     for event in collision_events.read() {
         if let CollisionEvent::Started(a, b, _) = event {
@@ -1720,69 +1741,79 @@ fn collisions(
                     continue;
                 }
 
-                if let Some((explosion, explosion_entity)) =
-                    get_from_either::<Explosion, &Explosion>(*a, *b, &explosion_query)
+                if let Ok(enemy_transform) = enemies_query.get_component::<Transform>(enemy_entity)
                 {
-                    // an enemy has hit an explosion
-                    kill_enemy(
-                        enemy,
-                        enemy_entity,
-                        &mut entities_to_despawn,
-                        &mut level,
-                        &mut commands,
-                        &audio_assets,
-                    );
-                } else if let Some((sword, sword_entity)) =
-                    get_from_either::<Sword, &Sword>(*a, *b, &sword_query)
-                {
-                    // an enemy has hit the sword
-                    if sword.active {
+                    if let Some((explosion, explosion_entity)) =
+                        get_from_either::<Explosion, &Explosion>(*a, *b, &explosion_query)
+                    {
+                        // an enemy has hit an explosion
                         kill_enemy(
                             enemy,
                             enemy_entity,
+                            enemy_transform.translation,
                             &mut entities_to_despawn,
                             &mut level,
                             &mut commands,
                             &audio_assets,
+                            &mut meshes,
+                            &mut materials,
                         );
-
-                        slow_mo_timer.target_time_scale = HIT_SLOW_MO_TIME_SCALE;
-                        slow_mo_timer.timer.set_duration(HIT_SLOW_MO_TIME);
-                        slow_mo_timer.timer.reset();
-                        slow_mo_timer.timer.unpause();
-                    }
-                } else if let Some((player, player_entity)) = get_from_either::<
-                    Player,
-                    (&Player, &Transform, &mut ExternalImpulse, &Retaliate),
-                >(
-                    *a, *b, &player_query
-                ) {
-                    // an enemy has hit the player
-                    health.current_health = health.current_health.saturating_sub(enemy.damage);
-                    play_sound(
-                        audio_assets.player_hit.clone(),
-                        PLAYER_HIT_VOLUME,
-                        &mut commands,
-                    );
-
-                    if let Ok(retaliate) = player_query.get_component::<Retaliate>(player_entity) {
-                        if retaliate.0 {
+                    } else if let Some((sword, sword_entity)) =
+                        get_from_either::<Sword, &Sword>(*a, *b, &sword_query)
+                    {
+                        // an enemy has hit the sword
+                        if sword.active {
                             kill_enemy(
                                 enemy,
                                 enemy_entity,
+                                enemy_transform.translation,
                                 &mut entities_to_despawn,
                                 &mut level,
                                 &mut commands,
                                 &audio_assets,
+                                &mut meshes,
+                                &mut materials,
                             );
-                        }
-                    }
 
-                    if let Ok(player_transform) =
-                        player_query.get_component::<Transform>(player_entity)
+                            slow_mo_timer.target_time_scale = HIT_SLOW_MO_TIME_SCALE;
+                            slow_mo_timer.timer.set_duration(HIT_SLOW_MO_TIME);
+                            slow_mo_timer.timer.reset();
+                            slow_mo_timer.timer.unpause();
+                        }
+                    } else if let Some((player, player_entity)) =
+                        get_from_either::<
+                            Player,
+                            (&Player, &Transform, &mut ExternalImpulse, &Retaliate),
+                        >(*a, *b, &player_query)
                     {
-                        if let Ok(enemy_transform) =
-                            enemies_query.get_component::<Transform>(enemy_entity)
+                        // an enemy has hit the player
+                        health.current_health = health.current_health.saturating_sub(enemy.damage);
+                        play_sound(
+                            audio_assets.player_hit.clone(),
+                            PLAYER_HIT_VOLUME,
+                            &mut commands,
+                        );
+
+                        if let Ok(retaliate) =
+                            player_query.get_component::<Retaliate>(player_entity)
+                        {
+                            if retaliate.0 {
+                                kill_enemy(
+                                    enemy,
+                                    enemy_entity,
+                                    enemy_transform.translation,
+                                    &mut entities_to_despawn,
+                                    &mut level,
+                                    &mut commands,
+                                    &audio_assets,
+                                    &mut meshes,
+                                    &mut materials,
+                                );
+                            }
+                        }
+
+                        if let Ok(player_transform) =
+                            player_query.get_component::<Transform>(player_entity)
                         {
                             // push the player back
                             let enemy_to_player =
@@ -1820,14 +1851,48 @@ fn get_from_either<'a, T: Component, Q: WorldQuery>(
 fn kill_enemy(
     enemy: &Enemy,
     enemy_entity: Entity,
+    enemy_translation: Vec3,
     entities_to_despawn: &mut EntitiesToDespawn,
     level: &mut Level,
     commands: &mut Commands,
     audio_assets: &AudioAssets,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
 ) {
     entities_to_despawn.0.push(enemy_entity);
     level.current_xp += enemy.xp_reward;
     play_sound(audio_assets.hit.clone(), HIT_VOLUME, commands);
+
+    let scale_animation = Tween::new(
+        EaseFunction::QuadraticOut,
+        DEATH_ANIMATION_DURATION,
+        TransformScaleLens {
+            start: Vec3::ONE,
+            end: Vec3::new(1.5, 1.5, 1.0),
+        },
+    );
+
+    let fade_animation = Tween::new(
+        EaseFunction::QuadraticOut,
+        DEATH_ANIMATION_DURATION,
+        ColorMaterialColorLens {
+            start: Color::WHITE,
+            end: Color::BLACK.with_a(0.0),
+        },
+    )
+    .with_completed_event(DEATH_ANIMATION_COMPLETE_EVENT_ID);
+
+    commands
+        .spawn(MaterialMesh2dBundle {
+            mesh: meshes.add(shape::Circle::new(enemy.size).into()).into(),
+            material: materials.add(ColorMaterial::from(Color::WHITE)),
+            transform: Transform::from_translation(enemy_translation),
+            ..default()
+        })
+        .insert(GameComponent)
+        .insert(DeathAnimation)
+        .insert(Animator::new(scale_animation))
+        .insert(AssetAnimator::new(fade_animation));
 }
 
 /// Despawns entities that need to be despawned
