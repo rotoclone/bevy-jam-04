@@ -1,5 +1,7 @@
-# bevy-jam-04
+# Last Stand
 For Bevy Jam 4: https://itch.io/jam/bevy-jam-4
+
+Play it on itch.io: https://the-nacho.itch.io/last-stand
 
 Licensed under the dual MIT / Apache-2.0 license
 
