@@ -2306,7 +2306,7 @@ fn activate_unlock_teleport_explosion(secondary_action: &mut SecondaryAction) {
     } = &mut secondary_action.0
     {
         *explodes = true;
-        *explosion_radius = 20.0;
+        *explosion_radius = 15.0;
     }
 }
 
