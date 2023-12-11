@@ -59,7 +59,7 @@ const HIT_IMPULSE: f32 = 50000.0;
 const SWORD_WIDTH: f32 = 1.0;
 const SWORD_LENGTH: f32 = 14.0;
 
-const PLAYER_ATTACK_COOLDOWN: Duration = Duration::from_millis(800);
+const PLAYER_ATTACK_COOLDOWN: Duration = Duration::from_millis(750);
 const SWORD_SWING_ROTATION_DEGREES: f32 = 60.0;
 const SWORD_SWING_TRANSLATION: f32 = 2.0;
 
@@ -100,7 +100,7 @@ const SWORD_Z: f32 = -1.0;
 const BACKGROUND_Z: f32 = -100.0;
 const EXPLOSION_Z: f32 = 1.0;
 
-const EXPLOSION_START_RADIUS: f32 = 0.1;
+const EXPLOSION_START_RADIUS: f32 = 6.0;
 const EXPLOSION_DURATION: Duration = Duration::from_millis(250);
 const EXPLOSION_FADE_TIME: Duration = Duration::from_millis(250);
 const EXPLOSION_COLOR: Color = Color::rgba(1.0, 1.0, 0.0, 0.9);
@@ -185,7 +185,11 @@ impl Plugin for GamePlugin {
         })
         .insert_resource(EntitiesToDespawn(Vec::new()))
         .insert_resource(AvailablePerks(Vec::new()))
-        .insert_resource(EnemySpeedMultiplier(1.0));
+        .insert_resource(EnemySpeedMultiplier(1.0))
+        .insert_resource(PerkChooserDelayTimers {
+            initial_delay: Timer::from_seconds(1.0, TimerMode::Once),
+            button_delays: Vec::new(),
+        });
 
         app.add_event::<LevelUp>()
             .add_systems(
@@ -207,6 +211,7 @@ impl Plugin for GamePlugin {
                     slow_mo.run_if(in_state(GameState::Game)),
                     level_up.after(update_level_display),
                     toggle_pause.run_if(input_just_pressed(PAUSE_INPUT)),
+                    show_perk_chooser_buttons,
                     choose_perk,
                     health_regen.run_if(in_state(GameState::Game)),
                 ),
@@ -251,6 +256,14 @@ fn insert_starting_resources(commands: &mut Commands) {
     });
     commands.insert_resource(AvailablePerks(Vec::new()));
     commands.insert_resource(EnemySpeedMultiplier(1.0));
+    commands.insert_resource(PerkChooserDelayTimers {
+        initial_delay: Timer::new(Duration::from_millis(500), TimerMode::Once),
+        button_delays: vec![
+            Timer::new(Duration::from_millis(100), TimerMode::Once),
+            Timer::new(Duration::from_millis(300), TimerMode::Once),
+            Timer::new(Duration::from_millis(500), TimerMode::Once),
+        ],
+    });
 
     let mut slow_mo_timer = Timer::new(HIT_SLOW_MO_TIME, TimerMode::Once);
     slow_mo_timer.pause();
@@ -368,10 +381,9 @@ impl PerkType {
         let has_health_regen = existing_perks.contains(&PerkType::UnlockHealthRegen);
         let has_retaliate = existing_perks.contains(&PerkType::Retaliate);
         let valid_perks = PerkType::iter().filter(|perk_type| match perk_type {
-            PerkType::UnlockGrenade => !has_grenade,
+            PerkType::UnlockGrenade => false, // !has_grenade,
             PerkType::LargerGrenadeExplosion => has_grenade,
             PerkType::ShorterGrenadeCooldown => has_grenade,
-            PerkType::ShorterAttackCooldown => has_grenade,
             PerkType::UnlockTeleport => !has_teleport,
             PerkType::ShorterTeleportCooldown => has_teleport,
             PerkType::UnlockTeleportExplosion => has_teleport && !has_teleport_explosion,
@@ -409,8 +421,8 @@ impl PerkType {
                 ("More Grenades", "Decreases grenade throw cooldown by 10%")
             }
             PerkType::UnlockTeleport => (
-                "Secondary action: Teleport",
-                "You may find yourself at the location of your mouse cursor, and you may ask yourself, \"Well, how did I get here?\" (You got there by pressing the space bar.)\nReplaces any existing secondary action you have.",
+                "Teleportation Device",
+                "You may find yourself at the location of your mouse cursor, and you may ask yourself, \"Well, how did I get here?\" (You got there by pressing the space bar.)",
             ),
             PerkType::ShorterTeleportCooldown => {
                 ("Better Teleporter", "Decreases the teleport cooldown by 10%")
@@ -578,6 +590,12 @@ struct AvailablePerks(Vec<PerkType>);
 
 #[derive(Resource)]
 struct EnemySpeedMultiplier(f32);
+
+#[derive(Resource)]
+struct PerkChooserDelayTimers {
+    initial_delay: Timer,
+    button_delays: Vec<Timer>,
+}
 
 #[derive(Component)]
 struct LoadingComponent;
@@ -1667,11 +1685,31 @@ fn collisions(
                     continue;
                 }
 
-                if let Some((player, player_entity)) = get_from_either::<
+                if let Some((explosion, explosion_entity)) =
+                    get_from_either::<Explosion, &Explosion>(*a, *b, &explosion_query)
+                {
+                    // an enemy has hit an explosion
+                    entities_to_despawn.0.push(enemy_entity);
+                    level.current_xp += enemy.xp_reward;
+                } else if let Some((sword, sword_entity)) =
+                    get_from_either::<Sword, &Sword>(*a, *b, &sword_query)
+                {
+                    // an enemy has hit the sword
+                    if sword.active {
+                        entities_to_despawn.0.push(enemy_entity);
+                        level.current_xp += enemy.xp_reward;
+
+                        slow_mo_timer.target_time_scale = HIT_SLOW_MO_TIME_SCALE;
+                        slow_mo_timer.timer.set_duration(HIT_SLOW_MO_TIME);
+                        slow_mo_timer.timer.reset();
+                        slow_mo_timer.timer.unpause();
+                    }
+                } else if let Some((player, player_entity)) = get_from_either::<
                     Player,
                     (&Player, &Transform, &mut ExternalImpulse, &Retaliate),
-                >(*a, *b, &player_query)
-                {
+                >(
+                    *a, *b, &player_query
+                ) {
                     // an enemy has hit the player
                     health.current_health = health.current_health.saturating_sub(enemy.damage);
 
@@ -1699,25 +1737,6 @@ fn collisions(
                             }
                         }
                     }
-                } else if let Some((sword, sword_entity)) =
-                    get_from_either::<Sword, &Sword>(*a, *b, &sword_query)
-                {
-                    // an enemy has hit the sword
-                    if sword.active {
-                        entities_to_despawn.0.push(enemy_entity);
-                        level.current_xp += enemy.xp_reward;
-
-                        slow_mo_timer.target_time_scale = HIT_SLOW_MO_TIME_SCALE;
-                        slow_mo_timer.timer.set_duration(HIT_SLOW_MO_TIME);
-                        slow_mo_timer.timer.reset();
-                        slow_mo_timer.timer.unpause();
-                    }
-                } else if let Some((explosion, explosion_entity)) =
-                    get_from_either::<Explosion, &Explosion>(*a, *b, &explosion_query)
-                {
-                    // an enemy has hit an explosion
-                    entities_to_despawn.0.push(enemy_entity);
-                    level.current_xp += enemy.xp_reward;
                 }
             }
         }
@@ -1807,9 +1826,11 @@ fn level_up(
     mut zoom: ResMut<ZoomLevel>,
     mut time: ResMut<Time<Virtual>>,
     mut player_query: Query<&Perks, With<Player>>,
-    mut perk_chooser_query: Query<&mut Visibility, With<PerkChooser>>,
+    mut perk_chooser_query: Query<&mut Visibility, (With<PerkChooser>, Without<ChoosePerkButton>)>,
+    mut perk_chooser_button_query: Query<&mut Visibility, With<ChoosePerkButton>>,
     mut perk_text_query: Query<(&mut Text, &PerkText)>,
     mut available_perks: ResMut<AvailablePerks>,
+    mut perk_chooser_timers: ResMut<PerkChooserDelayTimers>,
 ) {
     for _ in level_up_events.read() {
         // zoom out a bit
@@ -1832,6 +1853,15 @@ fn level_up(
         for mut visibility in perk_chooser_query.iter_mut() {
             *visibility = Visibility::Inherited;
         }
+
+        for mut visibility in perk_chooser_button_query.iter_mut() {
+            *visibility = Visibility::Hidden;
+        }
+
+        perk_chooser_timers.initial_delay.reset();
+        for timer in perk_chooser_timers.button_delays.iter_mut() {
+            timer.reset();
+        }
     }
 }
 
@@ -1848,6 +1878,30 @@ fn toggle_pause(mut time: ResMut<Time<Virtual>>) {
         time.unpause();
     } else {
         time.pause();
+    }
+}
+
+/// Handles showing the perk chooser buttons after a delay
+fn show_perk_chooser_buttons(
+    time: Res<Time<Real>>,
+    mut perk_chooser_timers: ResMut<PerkChooserDelayTimers>,
+    mut perk_chooser_button_query: Query<(&mut Visibility, &ChoosePerkButton)>,
+) {
+    perk_chooser_timers.initial_delay.tick(time.delta());
+    if perk_chooser_timers.initial_delay.finished() {
+        let mut to_become_visible = Vec::new();
+        for (i, timer) in perk_chooser_timers.button_delays.iter_mut().enumerate() {
+            timer.tick(time.delta());
+            if timer.just_finished() {
+                to_become_visible.push(i);
+            }
+        }
+
+        for (mut visibility, button) in perk_chooser_button_query.iter_mut() {
+            if to_become_visible.contains(&button.0) {
+                *visibility = Visibility::Inherited;
+            }
+        }
     }
 }
 
@@ -2040,7 +2094,7 @@ fn activate_unlock_grenade(secondary_action: &mut SecondaryAction) {
 
     secondary_action.0 = SecondaryActionType::Grenade {
         cooldown_timer,
-        explosion_radius: 25.0,
+        explosion_radius: 30.0,
     }
 }
 
@@ -2095,7 +2149,7 @@ fn activate_unlock_teleport_explosion(secondary_action: &mut SecondaryAction) {
     } = &mut secondary_action.0
     {
         *explodes = true;
-        *explosion_radius = 15.0;
+        *explosion_radius = 20.0;
     }
 }
 
