@@ -92,8 +92,8 @@ const ATTACK_DONE_EVENT_ID: u64 = 2;
 const EXPLOSION_COMPLETE_EVENT_ID: u64 = 3;
 const DEATH_ANIMATION_COMPLETE_EVENT_ID: u64 = 4;
 
-const HIT_SLOW_MO_TIME: Duration = Duration::from_millis(250);
-const HIT_SLOW_MO_TIME_SCALE: f32 = 0.5;
+const HIT_SLOW_MO_TIME: Duration = Duration::from_millis(150);
+const HIT_SLOW_MO_TIME_SCALE: f32 = 0.4;
 
 const SWORD_Z: f32 = -1.0;
 const BACKGROUND_Z: f32 = -100.0;
@@ -125,7 +125,7 @@ const SPAWN_WEIGHT_CHANGES: [EnemyType; 4] = [
     EnemyType::UltraAssassin,
 ];
 
-const NEXT_LEVEL_ADDITIONAL_XP_MULTIPLIER: f64 = 1.5;
+const NEXT_LEVEL_ADDITIONAL_XP_MULTIPLIER: f64 = 1.4;
 const STARTING_XP_THRESHOLD: u64 = 5;
 const NUM_PERK_CHOICES: usize = 3;
 const STARTING_HEALTH: u64 = 100;
