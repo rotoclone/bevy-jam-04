@@ -30,9 +30,9 @@ const NORMAL_BUTTON: Color = Color::rgb(0.25, 0.25, 0.25);
 const HOVERED_BUTTON: Color = Color::rgb(0.35, 0.35, 0.35);
 const PRESSED_BUTTON: Color = Color::rgb(0.35, 0.75, 0.35);
 
-const TITLE_FONT: &str = "fonts/SofiaSans-Light.ttf";
-const MAIN_FONT: &str = "fonts/SofiaSans-Light.ttf";
-const MONO_FONT: &str = "fonts/MajorMonoDisplay-Regular.ttf";
+const TITLE_FONT: &str = "fonts/SyneMono-Regular.ttf";
+const MAIN_FONT: &str = "fonts/SyneMono-Regular.ttf";
+const MONO_FONT: &str = "fonts/SyneMono-Regular.ttf";
 
 const MASTER_VOLUME: f32 = 0.5;
 const STARTING_ZOOM_LEVEL: f32 = 0.33;

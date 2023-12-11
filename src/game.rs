@@ -40,8 +40,6 @@ use strum::{EnumIter, IntoEnumIterator};
 
 use crate::*;
 
-const LOADING_FONT: &str = "fonts/MajorMonoDisplay-Regular.ttf";
-
 const PLAYER_SIZE: f32 = 5.0;
 const PLAYER_MAX_SPEED: f32 = 70.0;
 const PLAYER_MOVE_FORCE: f32 = 100000.0;
@@ -720,9 +718,9 @@ fn loading_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
         .spawn(
             TextBundle::from_section(
-                "loading...\n0%",
+                "Loading...\n0%",
                 TextStyle {
-                    font: asset_server.load(LOADING_FONT),
+                    font: asset_server.load(MONO_FONT),
                     font_size: 50.0,
                     color: Color::WHITE,
                 },
@@ -747,7 +745,7 @@ fn display_loading_progress(
             *last_done = progress.done;
             let percent_done = (progress.done as f32 / progress.total as f32) * 100.0;
             for mut loading_text in loading_text_query.iter_mut() {
-                loading_text.sections[0].value = format!("loading...\n{percent_done:.0}%");
+                loading_text.sections[0].value = format!("Loading...\n{percent_done:.0}%");
             }
         }
     }
@@ -874,7 +872,7 @@ fn game_setup(
                 format!("Health: {STARTING_HEALTH}/{STARTING_HEALTH}"),
                 TextStyle {
                     font: asset_server.load(MONO_FONT),
-                    font_size: 35.0,
+                    font_size: 40.0,
                     color: Color::WHITE,
                 },
             )
@@ -903,7 +901,7 @@ fn game_setup(
                 right: Val::Px(0.0),
                 top: Val::Px(0.0),
                 margin: UiRect {
-                    left: Val::Px(5.0),
+                    right: Val::Px(5.0),
                     top: Val::Px(5.0),
                     ..default()
                 },
@@ -923,7 +921,7 @@ fn game_setup(
                         "Level 1",
                         TextStyle {
                             font: asset_server.load(MONO_FONT),
-                            font_size: 28.0,
+                            font_size: 30.0,
                             color: Color::Rgba {
                                 red: 0.75,
                                 green: 0.75,
@@ -950,7 +948,7 @@ fn game_setup(
                         format!("XP: 0/{STARTING_XP_THRESHOLD}"),
                         TextStyle {
                             font: asset_server.load(MONO_FONT),
-                            font_size: 33.0,
+                            font_size: 35.0,
                             color: Color::WHITE,
                         },
                     )
@@ -972,7 +970,7 @@ fn game_setup(
                         "Enemies: 0",
                         TextStyle {
                             font: asset_server.load(MONO_FONT),
-                            font_size: 20.0,
+                            font_size: 25.0,
                             color: Color::WHITE,
                         },
                     )

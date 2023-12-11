@@ -25,7 +25,7 @@ fn menu_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .spawn(NodeBundle {
             style: Style {
                 width: Val::Percent(100.0),
-                height: Val::Percent(33.0),
+                height: Val::Percent(50.0),
                 position_type: PositionType::Absolute,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
@@ -37,10 +37,10 @@ fn menu_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .with_children(|parent| {
             parent.spawn(
                 TextBundle::from_section(
-                    "Last Stand",
+                    "LAST STAND",
                     TextStyle {
                         font: asset_server.load(TITLE_FONT),
-                        font_size: 75.0,
+                        font_size: 90.0,
                         color: Color::rgb(0.9, 0.2, 0.2),
                     },
                 )
