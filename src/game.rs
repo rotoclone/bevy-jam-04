@@ -24,9 +24,11 @@ use bevy_rapier2d::{
     pipeline::CollisionEvent,
 };
 use bevy_tweening::{
-    lens::{TransformPositionLens, TransformRotateZLens, TransformScaleLens},
-    Animator, AnimatorState, Delay, EaseFunction, EaseMethod, Sequence, Tracks, Tween,
-    TweenCompleted,
+    lens::{
+        ColorMaterialColorLens, TransformPositionLens, TransformRotateZLens, TransformScaleLens,
+    },
+    Animator, AnimatorState, AssetAnimator, Delay, EaseFunction, EaseMethod, Sequence, Tracks,
+    Tween, TweenCompleted,
 };
 use iyes_progress::{ProgressCounter, ProgressPlugin};
 use rand::{
@@ -57,7 +59,7 @@ const HIT_IMPULSE: f32 = 50000.0;
 const SWORD_WIDTH: f32 = 1.0;
 const SWORD_LENGTH: f32 = 14.0;
 
-const PLAYER_ATTACK_COOLDOWN: Duration = Duration::from_millis(1000);
+const PLAYER_ATTACK_COOLDOWN: Duration = Duration::from_millis(800);
 const SWORD_SWING_ROTATION_DEGREES: f32 = 60.0;
 const SWORD_SWING_TRANSLATION: f32 = 2.0;
 
@@ -89,12 +91,19 @@ const SWORD_END_TRANSLATION: Vec3 =
 
 const SWORD_SWING_COMPLETE_EVENT_ID: u64 = 1;
 const ATTACK_DONE_EVENT_ID: u64 = 2;
+const EXPLOSION_COMPLETE_EVENT_ID: u64 = 3;
 
 const HIT_SLOW_MO_TIME: Duration = Duration::from_millis(250);
 const HIT_SLOW_MO_TIME_SCALE: f32 = 0.5;
 
 const SWORD_Z: f32 = -1.0;
 const BACKGROUND_Z: f32 = -100.0;
+const EXPLOSION_Z: f32 = 1.0;
+
+const EXPLOSION_START_RADIUS: f32 = 0.1;
+const EXPLOSION_DURATION: Duration = Duration::from_millis(250);
+const EXPLOSION_FADE_TIME: Duration = Duration::from_millis(250);
+const EXPLOSION_COLOR: Color = Color::rgba(1.0, 1.0, 0.0, 0.9);
 
 const PLAY_AREA_SIZE: Vec2 = Vec2::new(1000.0, 1000.0);
 
@@ -127,6 +136,7 @@ const MOVE_RIGHT_KEY: KeyCode = KeyCode::D;
 const MOVE_UP_KEY: KeyCode = KeyCode::W;
 const MOVE_DOWN_KEY: KeyCode = KeyCode::S;
 const ATTACK_INPUT: MouseButton = MouseButton::Left;
+const SECONDARY_ACTION_INPUT: KeyCode = KeyCode::Space;
 const PAUSE_INPUT: KeyCode = KeyCode::P;
 
 const BG_MUSIC_VOLUME: f32 = 0.5;
@@ -174,7 +184,8 @@ impl Plugin for GamePlugin {
             xp_needed: 1,
         })
         .insert_resource(EntitiesToDespawn(Vec::new()))
-        .insert_resource(AvailablePerks(Vec::new()));
+        .insert_resource(AvailablePerks(Vec::new()))
+        .insert_resource(EnemySpeedMultiplier(1.0));
 
         app.add_event::<LevelUp>()
             .add_systems(
@@ -183,6 +194,8 @@ impl Plugin for GamePlugin {
                     update_attack_cooldown.before(player_attack),
                     player_movement,
                     player_attack.run_if(input_pressed(ATTACK_INPUT)),
+                    update_secondary_action_cooldown.before(player_secondary_action),
+                    player_secondary_action.run_if(input_pressed(SECONDARY_ACTION_INPUT)),
                     tween_completed,
                     move_camera.after(player_movement),
                     keep_player_in_bounds.after(player_movement),
@@ -190,18 +203,24 @@ impl Plugin for GamePlugin {
                     change_spawn_weights.run_if(in_state(GameState::Game)),
                     move_enemies,
                     collisions.run_if(in_state(GameState::Game)),
+                    update_enemy_count_display,
+                    slow_mo.run_if(in_state(GameState::Game)),
+                    level_up.after(update_level_display),
+                    toggle_pause.run_if(input_just_pressed(PAUSE_INPUT)),
+                    choose_perk,
+                    health_regen.run_if(in_state(GameState::Game)),
+                ),
+            )
+            .add_systems(
+                Update,
+                (
                     update_level_display
                         .after(collisions)
                         .run_if(resource_changed::<Level>()),
                     update_health_display
                         .after(collisions)
                         .run_if(resource_changed::<Health>()),
-                    update_enemy_count_display,
-                    slow_mo.run_if(in_state(GameState::Game)),
                     check_for_death.run_if(resource_changed::<Health>()),
-                    level_up.after(update_level_display),
-                    toggle_pause.run_if(input_just_pressed(PAUSE_INPUT)),
-                    choose_perk,
                 ),
             )
             .add_systems(PostUpdate, despawn_entities);
@@ -231,6 +250,7 @@ fn insert_starting_resources(commands: &mut Commands) {
         max_health: STARTING_HEALTH,
     });
     commands.insert_resource(AvailablePerks(Vec::new()));
+    commands.insert_resource(EnemySpeedMultiplier(1.0));
 
     let mut slow_mo_timer = Timer::new(HIT_SLOW_MO_TIME, TimerMode::Once);
     slow_mo_timer.pause();
@@ -315,14 +335,13 @@ fn build_starting_spawn_weights() -> SpawnWeights {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Hash, EnumIter)]
+#[derive(PartialEq, Eq, Clone, Copy, Hash, Debug, EnumIter)]
 enum PerkType {
     LongerSword,
     WiderSwordSwing,
     ShorterAttackCooldown,
     HigherMaxSpeed,
     HigherMaxHealth,
-    MorePerks,
     Heal,
     UnlockGrenade,
     LargerGrenadeExplosion,
@@ -335,7 +354,6 @@ enum PerkType {
     FasterHealthRegen,
     Retaliate,
     SlowerEnemies,
-    Invincible,
 }
 
 impl PerkType {
@@ -344,16 +362,15 @@ impl PerkType {
         amount: usize,
         existing_perks: &HashSet<PerkType>,
     ) -> Vec<PerkType> {
-        let has_more_perks = existing_perks.contains(&PerkType::MorePerks);
         let has_grenade = existing_perks.contains(&PerkType::UnlockGrenade);
         let has_teleport = existing_perks.contains(&PerkType::UnlockTeleport);
         let has_teleport_explosion = existing_perks.contains(&PerkType::UnlockTeleportExplosion);
         let has_health_regen = existing_perks.contains(&PerkType::UnlockHealthRegen);
         let has_retaliate = existing_perks.contains(&PerkType::Retaliate);
         let valid_perks = PerkType::iter().filter(|perk_type| match perk_type {
-            PerkType::MorePerks => !has_more_perks,
             PerkType::UnlockGrenade => !has_grenade,
             PerkType::LargerGrenadeExplosion => has_grenade,
+            PerkType::ShorterGrenadeCooldown => has_grenade,
             PerkType::ShorterAttackCooldown => has_grenade,
             PerkType::UnlockTeleport => !has_teleport,
             PerkType::ShorterTeleportCooldown => has_teleport,
@@ -379,10 +396,6 @@ impl PerkType {
             }
             PerkType::HigherMaxSpeed => ("Stronger Legs", "Increases max run speed by 10%"),
             PerkType::HigherMaxHealth => ("Endurance", "Increases max health by 10%"),
-            PerkType::MorePerks => (
-                "Choosy",
-                "Increases the number of perks to choose from each level by 1",
-            ),
             PerkType::Heal => ("Second Wind", "Heals you to full health"),
             PerkType::UnlockGrenade => (
                 "Secondary action: Grenade",
@@ -397,18 +410,17 @@ impl PerkType {
             }
             PerkType::UnlockTeleport => (
                 "Secondary action: Teleport",
-                "Allows you to teleport to the mouse cursor. Replaces any existing secondary action you have.",
+                "You may find yourself at the location of your mouse cursor, and you may ask yourself, \"Well, how did I get here?\" (You got there by pressing the space bar.)\nReplaces any existing secondary action you have.",
             ),
             PerkType::ShorterTeleportCooldown => {
-                ("More Teleporting", "Decreases the teleport cooldown by 10%")
+                ("Better Teleporter", "Decreases the teleport cooldown by 10%")
             }
-            PerkType::UnlockTeleportExplosion => ("Violent Teleportation", "When you teleport somewhere, you cause an explosion that kills enemies near your destination"),
-            PerkType::LargerTeleportExplosion => ("More Violent Teleportation", "Increases teleportation explosion radius by 10%"),
+            PerkType::UnlockTeleportExplosion => ("Spacetime Destabilization", "When you teleport somewhere, you cause an explosion that kills enemies near your destination"),
+            PerkType::LargerTeleportExplosion => ("Increased Spacetime Destabilization", "Increases teleportation explosion radius by 10%"),
             PerkType::UnlockHealthRegen => ("Resilient", "You will slowly regenerate health"),
             PerkType::FasterHealthRegen => ("More Resilient", "Increases health regeneration rate by 10%"),
             PerkType::Retaliate => ("Retaliation", "When an enemy hits you, they die"),
             PerkType::SlowerEnemies => ("Faster Reflexes", "All enemies move 5% slower"),
-            PerkType::Invincible => ("Mind Over Matter", "Makes you invincible for a short period of time"),
         };
 
         (name.to_string(), desc.to_string())
@@ -564,6 +576,9 @@ struct SlowMoTimer {
 #[derive(Resource)]
 struct AvailablePerks(Vec<PerkType>);
 
+#[derive(Resource)]
+struct EnemySpeedMultiplier(f32);
+
 #[derive(Component)]
 struct LoadingComponent;
 
@@ -588,16 +603,30 @@ struct MaxSpeed(f32);
 #[derive(Component)]
 struct Perks(HashSet<PerkType>);
 
-impl Perks {
-    /// Determines the number of perks to choose from on level up
-    fn get_num_perk_choices(&self) -> usize {
-        if self.0.contains(&PerkType::MorePerks) {
-            NUM_PERK_CHOICES + 1
-        } else {
-            NUM_PERK_CHOICES
-        }
-    }
+enum SecondaryActionType {
+    None,
+    Grenade {
+        cooldown_timer: Timer,
+        explosion_radius: f32,
+    },
+    Teleport {
+        cooldown_timer: Timer,
+        explodes: bool,
+        explosion_radius: f32,
+    },
 }
+
+#[derive(Component)]
+struct SecondaryAction(SecondaryActionType);
+
+#[derive(Component)]
+struct HealthRegen {
+    timer: Timer,
+    amount: u64,
+}
+
+#[derive(Component)]
+struct Retaliate(bool);
 
 #[derive(Component)]
 struct SwordPivot;
@@ -637,6 +666,9 @@ struct ChoosePerkButton(usize);
 
 #[derive(Component)]
 struct PerkText(usize);
+
+#[derive(Component)]
+struct Explosion;
 
 #[derive(Event)]
 struct LevelUp {
@@ -779,6 +811,12 @@ fn game_setup(
         .insert(Player)
         .insert(Attacking(false))
         .insert(MaxSpeed(PLAYER_MAX_SPEED))
+        .insert(SecondaryAction(SecondaryActionType::None))
+        .insert(HealthRegen {
+            timer: Timer::new(Duration::from_nanos(1), TimerMode::Once),
+            amount: 0,
+        })
+        .insert(Retaliate(false))
         .insert(Perks(HashSet::new()))
         .insert(attack_cooldown)
         .with_children(|parent| {
@@ -1130,6 +1168,8 @@ fn tween_completed(
     mut reader: EventReader<TweenCompleted>,
     mut sword_query: Query<&mut Sword>,
     mut player_attacking_query: Query<&mut Attacking, With<Player>>,
+    explosions_query: Query<Entity, With<Explosion>>,
+    mut entities_to_despawn: ResMut<EntitiesToDespawn>,
 ) {
     for ev in reader.read() {
         if ev.user_data == SWORD_SWING_COMPLETE_EVENT_ID {
@@ -1143,10 +1183,18 @@ fn tween_completed(
                 attacking.0 = false;
             }
         }
+
+        if ev.user_data == EXPLOSION_COMPLETE_EVENT_ID {
+            for entity in explosions_query.iter() {
+                if ev.entity == entity {
+                    entities_to_despawn.0.push(entity);
+                }
+            }
+        }
     }
 }
 
-/// Updates remaining attack cooldowns
+/// Updates attack cooldowns
 fn update_attack_cooldown(mut query: Query<&mut AttackCooldown>, time: Res<Time>) {
     for mut cooldown in query.iter_mut() {
         cooldown.0.tick(time.delta());
@@ -1169,13 +1217,7 @@ fn player_movement(
     window_query: Query<&Window>,
     keycode: Res<Input<KeyCode>>,
 ) {
-    let (camera, camera_transform) = camera_query.single();
-    let Some(cursor_position) = window_query.single().cursor_position() else {
-        return;
-    };
-    // Calculate a world position based on the cursor's position.
-    let Some(cursor_world_position) =
-        camera.viewport_to_world_2d(camera_transform, cursor_position)
+    let Some(cursor_world_position) = get_cursor_world_position(&camera_query, &window_query)
     else {
         return;
     };
@@ -1239,13 +1281,7 @@ fn player_attack(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     window_query: Query<&Window>,
 ) {
-    let (camera, camera_transform) = camera_query.single();
-    let Some(cursor_position) = window_query.single().cursor_position() else {
-        return;
-    };
-    // Calculate a world position based on the cursor's position.
-    let Some(cursor_world_position) =
-        camera.viewport_to_world_2d(camera_transform, cursor_position)
+    let Some(cursor_world_position) = get_cursor_world_position(&camera_query, &window_query)
     else {
         return;
     };
@@ -1277,6 +1313,142 @@ fn player_attack(
 
         cooldown.0.reset();
     }
+}
+
+/// Updates secondary action cooldowns
+fn update_secondary_action_cooldown(mut query: Query<&mut SecondaryAction>, time: Res<Time>) {
+    for mut secondary_action in query.iter_mut() {
+        let timer = match &mut secondary_action.0 {
+            SecondaryActionType::None => continue,
+            SecondaryActionType::Grenade { cooldown_timer, .. } => cooldown_timer,
+            SecondaryActionType::Teleport { cooldown_timer, .. } => cooldown_timer,
+        };
+        timer.tick(time.delta());
+    }
+}
+
+/// Makes the player do their secondary action
+fn player_secondary_action(
+    mut commands: Commands,
+    mut player_query: Query<(&mut SecondaryAction, &mut Transform), With<Player>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    window_query: Query<&Window>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    for (mut secondary_action, mut transform) in player_query.iter_mut() {
+        match &mut secondary_action.0 {
+            SecondaryActionType::None => continue,
+            SecondaryActionType::Grenade {
+                ref mut cooldown_timer,
+                explosion_radius,
+            } => {
+                if !cooldown_timer.finished() {
+                    continue;
+                }
+                let Some(cursor_world_position) =
+                    get_cursor_world_position(&camera_query, &window_query)
+                else {
+                    return;
+                };
+                //TODO throw grenade
+                cooldown_timer.reset();
+            }
+            SecondaryActionType::Teleport {
+                ref mut cooldown_timer,
+                explodes,
+                explosion_radius,
+            } => {
+                if !cooldown_timer.finished() {
+                    continue;
+                }
+                let Some(cursor_world_position) =
+                    get_cursor_world_position(&camera_query, &window_query)
+                else {
+                    return;
+                };
+                teleport(
+                    &mut commands,
+                    &mut transform,
+                    *explodes,
+                    *explosion_radius,
+                    cursor_world_position,
+                    &mut meshes,
+                    &mut materials,
+                );
+                cooldown_timer.reset();
+            }
+        }
+    }
+}
+
+/// Teleports the provided transform to the provided position
+fn teleport(
+    commands: &mut Commands,
+    transform: &mut Transform,
+    explodes: bool,
+    explosion_radius: f32,
+    target_position: Vec2,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+) {
+    transform.translation = target_position.extend(transform.translation.z);
+    if explodes {
+        spawn_explosion(
+            target_position,
+            explosion_radius,
+            commands,
+            meshes,
+            materials,
+        );
+    }
+}
+
+/// Creates an explosion at the provided position
+fn spawn_explosion(
+    location: Vec2,
+    radius: f32,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+) {
+    let end_scale = radius / EXPLOSION_START_RADIUS;
+    let scale_animation = Tween::new(
+        EaseFunction::QuadraticOut,
+        EXPLOSION_DURATION,
+        TransformScaleLens {
+            start: Vec3::ONE,
+            end: Vec3::new(end_scale, end_scale, 1.0),
+        },
+    );
+
+    let fade_animation = Delay::new(EXPLOSION_DURATION).then(
+        Tween::new(
+            EaseFunction::QuadraticIn,
+            EXPLOSION_FADE_TIME,
+            ColorMaterialColorLens {
+                start: EXPLOSION_COLOR,
+                end: EXPLOSION_COLOR.with_a(0.0),
+            },
+        )
+        .with_completed_event(EXPLOSION_COMPLETE_EVENT_ID),
+    );
+
+    commands
+        .spawn(MaterialMesh2dBundle {
+            mesh: meshes
+                .add(shape::Circle::new(EXPLOSION_START_RADIUS).into())
+                .into(),
+            material: materials.add(ColorMaterial::from(EXPLOSION_COLOR)),
+            transform: Transform::from_translation(location.extend(EXPLOSION_Z)),
+            ..default()
+        })
+        .insert(GameComponent)
+        .insert(Collider::ball(EXPLOSION_START_RADIUS))
+        .insert(Sensor)
+        .insert(Explosion)
+        .insert(Animator::new(scale_animation))
+        .insert(AssetAnimator::new(fade_animation));
 }
 
 /// Moves the camera to follow the player
@@ -1446,6 +1618,7 @@ fn move_enemies(
         Without<Player>,
     >,
     player_query: Query<&Transform, With<Player>>,
+    speed_multiplier: Res<EnemySpeedMultiplier>,
 ) {
     if let Ok(player_transform) = player_query.get_single() {
         for (mut force, mut velocity, mut transform, enemy) in &mut enemy_query {
@@ -1464,7 +1637,9 @@ fn move_enemies(
             velocity.angvel = 0.0;
 
             // clamp speed
-            velocity.linvel = velocity.linvel.clamp_length_max(enemy.max_speed);
+            velocity.linvel = velocity
+                .linvel
+                .clamp_length_max(enemy.max_speed * speed_multiplier.0);
         }
     }
 }
@@ -1478,7 +1653,8 @@ fn collisions(
     mut slow_mo_timer: ResMut<SlowMoTimer>,
     enemies_query: Query<(&Enemy, &Transform)>,
     sword_query: Query<&Sword>,
-    mut player_query: Query<(&Player, &Transform, &mut ExternalImpulse)>,
+    mut player_query: Query<(&Player, &Transform, &mut ExternalImpulse, &Retaliate)>,
+    explosion_query: Query<&Explosion>,
 ) {
     for event in collision_events.read() {
         if let CollisionEvent::Started(a, b, _) = event {
@@ -1493,11 +1669,18 @@ fn collisions(
 
                 if let Some((player, player_entity)) = get_from_either::<
                     Player,
-                    (&Player, &Transform, &mut ExternalImpulse),
+                    (&Player, &Transform, &mut ExternalImpulse, &Retaliate),
                 >(*a, *b, &player_query)
                 {
                     // an enemy has hit the player
                     health.current_health = health.current_health.saturating_sub(enemy.damage);
+
+                    if let Ok(retaliate) = player_query.get_component::<Retaliate>(player_entity) {
+                        if retaliate.0 {
+                            entities_to_despawn.0.push(enemy_entity);
+                            level.current_xp += enemy.xp_reward;
+                        }
+                    }
 
                     if let Ok(player_transform) =
                         player_query.get_component::<Transform>(player_entity)
@@ -1529,6 +1712,12 @@ fn collisions(
                         slow_mo_timer.timer.reset();
                         slow_mo_timer.timer.unpause();
                     }
+                } else if let Some((explosion, explosion_entity)) =
+                    get_from_either::<Explosion, &Explosion>(*a, *b, &explosion_query)
+                {
+                    // an enemy has hit an explosion
+                    entities_to_despawn.0.push(enemy_entity);
+                    level.current_xp += enemy.xp_reward;
                 }
             }
         }
@@ -1617,35 +1806,22 @@ fn level_up(
     mut level_up_events: EventReader<LevelUp>,
     mut zoom: ResMut<ZoomLevel>,
     mut time: ResMut<Time<Virtual>>,
-    mut player_query: Query<(&mut AttackCooldown, &mut MaxSpeed, &Perks), With<Player>>,
+    mut player_query: Query<&Perks, With<Player>>,
     mut perk_chooser_query: Query<&mut Visibility, With<PerkChooser>>,
     mut perk_text_query: Query<(&mut Text, &PerkText)>,
     mut available_perks: ResMut<AvailablePerks>,
 ) {
-    for event in level_up_events.read() {
+    for _ in level_up_events.read() {
         // zoom out a bit
         let new_zoom = MAX_ZOOM_LEVEL.min(zoom.0 * ZOOM_LEVEL_MULTIPLIER);
         zoom.0 = new_zoom;
-
-        // reduce attack cooldown and increase max speed
-        // TODO remove
-        /*
-        for (mut cooldown, mut max_speed, perks) in player_query.iter_mut() {
-            let new_duration = cooldown.0.duration().mul_f32(0.8);
-            cooldown.0.set_duration(new_duration);
-
-            let new_max_speed = max_speed.0 * 1.1;
-            max_speed.0 = new_max_speed;
-        }
-        */
 
         // pause the game
         time.pause();
 
         // display perk chooser
-        for (mut cooldown, mut max_speed, perks) in player_query.iter_mut() {
-            let num_perk_choices = perks.get_num_perk_choices();
-            available_perks.0 = PerkType::choose_random_perk_types(num_perk_choices, &perks.0);
+        for perks in player_query.iter_mut() {
+            available_perks.0 = PerkType::choose_random_perk_types(NUM_PERK_CHOICES, &perks.0);
             for (mut text, perk_text) in perk_text_query.iter_mut() {
                 let (name, desc) = available_perks.0[perk_text.0].get_name_and_description();
                 text.sections[0].value = name;
@@ -1681,18 +1857,37 @@ fn choose_perk(
     interaction_query: Query<(&Interaction, &ChoosePerkButton), Changed<Interaction>>,
     mut perk_chooser_query: Query<&mut Visibility, With<PerkChooser>>,
     available_perks: Res<AvailablePerks>,
-    mut player_query: Query<(&mut AttackCooldown, &mut MaxSpeed, &mut Perks), With<Player>>,
+    mut player_query: Query<
+        (
+            &mut AttackCooldown,
+            &mut MaxSpeed,
+            &mut HealthRegen,
+            &mut SecondaryAction,
+            &mut Retaliate,
+            &mut Perks,
+        ),
+        With<Player>,
+    >,
     mut sword_pivot_query: Query<
         (&mut SwordAnimationParams, &mut Animator<Transform>),
         With<SwordPivot>,
     >,
     mut health: ResMut<Health>,
+    mut enemy_speed_multiplier: ResMut<EnemySpeedMultiplier>,
 ) {
     for (interaction, button) in interaction_query.iter() {
         if *interaction == Interaction::Pressed {
             let chosen_perk = available_perks.0[button.0];
 
-            for (mut cooldown, mut max_speed, mut perks) in player_query.iter_mut() {
+            for (
+                mut cooldown,
+                mut max_speed,
+                mut health_regen,
+                mut secondary_action,
+                mut retaliate,
+                mut perks,
+            ) in player_query.iter_mut()
+            {
                 match chosen_perk {
                     PerkType::LongerSword => activate_longer_sword(&mut sword_pivot_query),
                     PerkType::WiderSwordSwing => activate_wider_sword_swing(&mut sword_pivot_query),
@@ -1701,20 +1896,28 @@ fn choose_perk(
                     }
                     PerkType::HigherMaxSpeed => activate_higher_max_speed(&mut max_speed),
                     PerkType::HigherMaxHealth => activate_higher_max_health(&mut health),
-                    PerkType::MorePerks => activate_more_perks(),
                     PerkType::Heal => activate_heal(&mut health),
-                    PerkType::UnlockGrenade => activate_unlock_grenade(),
-                    PerkType::LargerGrenadeExplosion => activate_larger_grenade_explosion(),
-                    PerkType::ShorterGrenadeCooldown => activate_shorter_grenade_cooldown(),
-                    PerkType::UnlockTeleport => activate_teleport(),
-                    PerkType::ShorterTeleportCooldown => activate_shorter_teleport_cooldown(),
-                    PerkType::UnlockTeleportExplosion => activate_unlock_teleport_explosion(),
-                    PerkType::LargerTeleportExplosion => activate_larger_teleport_explosion(),
-                    PerkType::UnlockHealthRegen => activate_unlock_health_regen(),
-                    PerkType::FasterHealthRegen => activate_faster_health_regen(),
-                    PerkType::Retaliate => activate_retaliate(),
-                    PerkType::SlowerEnemies => activate_slower_enemies(),
-                    PerkType::Invincible => activate_invincible(),
+                    PerkType::UnlockGrenade => activate_unlock_grenade(&mut secondary_action),
+                    PerkType::LargerGrenadeExplosion => {
+                        activate_larger_grenade_explosion(&mut secondary_action)
+                    }
+                    PerkType::ShorterGrenadeCooldown => {
+                        activate_shorter_grenade_cooldown(&mut secondary_action)
+                    }
+                    PerkType::UnlockTeleport => activate_unlock_teleport(&mut secondary_action),
+                    PerkType::ShorterTeleportCooldown => {
+                        activate_shorter_teleport_cooldown(&mut secondary_action)
+                    }
+                    PerkType::UnlockTeleportExplosion => {
+                        activate_unlock_teleport_explosion(&mut secondary_action)
+                    }
+                    PerkType::LargerTeleportExplosion => {
+                        activate_larger_teleport_explosion(&mut secondary_action)
+                    }
+                    PerkType::UnlockHealthRegen => activate_unlock_health_regen(&mut health_regen),
+                    PerkType::FasterHealthRegen => activate_faster_health_regen(&mut health_regen),
+                    PerkType::Retaliate => activate_retaliate(&mut retaliate),
+                    PerkType::SlowerEnemies => activate_slower_enemies(&mut enemy_speed_multiplier),
                 }
 
                 perks.0.insert(chosen_perk);
@@ -1725,6 +1928,23 @@ fn choose_perk(
             }
 
             time.unpause();
+        }
+    }
+}
+
+/// Handles regenerating the player's health
+fn health_regen(
+    mut player_query: Query<&mut HealthRegen, With<Player>>,
+    mut health: ResMut<Health>,
+    time: Res<Time>,
+) {
+    for mut health_regen in player_query.iter_mut() {
+        health_regen.timer.tick(time.delta());
+        if health_regen.timer.just_finished() {
+            let new_health = health
+                .max_health
+                .min(health.current_health + health_regen.amount);
+            health.current_health = new_health;
         }
     }
 }
@@ -1748,6 +1968,19 @@ fn stop_background_music(music_controller: Query<&AudioSink, With<BackgroundMusi
     if let Ok(sink) = music_controller.get_single() {
         sink.stop();
     }
+}
+
+/// Gets the cursor's position in world coordinates
+fn get_cursor_world_position(
+    camera_query: &Query<(&Camera, &GlobalTransform)>,
+    window_query: &Query<&Window>,
+) -> Option<Vec2> {
+    let (camera, camera_transform) = camera_query.single();
+    let Some(cursor_position) = window_query.single().cursor_position() else {
+        return None;
+    };
+
+    camera.viewport_to_world_2d(camera_transform, cursor_position)
 }
 
 //
@@ -1797,58 +2030,100 @@ fn activate_higher_max_health(health: &mut Health) {
     health.current_health = new_current_health.round() as u64;
 }
 
-fn activate_more_perks() {
-    //TODO
-}
-
 fn activate_heal(health: &mut Health) {
     health.current_health = health.max_health;
 }
 
-fn activate_unlock_grenade() {
-    //TODO
+fn activate_unlock_grenade(secondary_action: &mut SecondaryAction) {
+    let mut cooldown_timer = Timer::new(Duration::from_millis(5000), TimerMode::Once);
+    cooldown_timer.set_elapsed(cooldown_timer.duration());
+
+    secondary_action.0 = SecondaryActionType::Grenade {
+        cooldown_timer,
+        explosion_radius: 25.0,
+    }
 }
 
-fn activate_larger_grenade_explosion() {
-    //TODO
+fn activate_larger_grenade_explosion(secondary_action: &mut SecondaryAction) {
+    if let SecondaryActionType::Grenade {
+        ref mut explosion_radius,
+        ..
+    } = &mut secondary_action.0
+    {
+        *explosion_radius *= 1.1;
+    }
 }
 
-fn activate_shorter_grenade_cooldown() {
-    //TODO
+fn activate_shorter_grenade_cooldown(secondary_action: &mut SecondaryAction) {
+    if let SecondaryActionType::Grenade {
+        ref mut cooldown_timer,
+        ..
+    } = &mut secondary_action.0
+    {
+        let new_cooldown = cooldown_timer.duration().mul_f32(0.9);
+        cooldown_timer.set_duration(new_cooldown);
+    }
 }
 
-fn activate_teleport() {
-    //TODO
+fn activate_unlock_teleport(secondary_action: &mut SecondaryAction) {
+    let mut cooldown_timer = Timer::new(Duration::from_millis(5000), TimerMode::Once);
+    cooldown_timer.set_elapsed(cooldown_timer.duration());
+
+    secondary_action.0 = SecondaryActionType::Teleport {
+        cooldown_timer,
+        explodes: false,
+        explosion_radius: 0.0,
+    }
 }
 
-fn activate_shorter_teleport_cooldown() {
-    //TODO
+fn activate_shorter_teleport_cooldown(secondary_action: &mut SecondaryAction) {
+    if let SecondaryActionType::Teleport {
+        ref mut cooldown_timer,
+        ..
+    } = &mut secondary_action.0
+    {
+        let new_cooldown = cooldown_timer.duration().mul_f32(0.9);
+        cooldown_timer.set_duration(new_cooldown);
+    }
 }
 
-fn activate_unlock_teleport_explosion() {
-    //TODO
+fn activate_unlock_teleport_explosion(secondary_action: &mut SecondaryAction) {
+    if let SecondaryActionType::Teleport {
+        ref mut explodes,
+        ref mut explosion_radius,
+        ..
+    } = &mut secondary_action.0
+    {
+        *explodes = true;
+        *explosion_radius = 15.0;
+    }
 }
 
-fn activate_larger_teleport_explosion() {
-    //TODO
+fn activate_larger_teleport_explosion(secondary_action: &mut SecondaryAction) {
+    if let SecondaryActionType::Teleport {
+        ref mut explosion_radius,
+        ..
+    } = &mut secondary_action.0
+    {
+        *explosion_radius *= 1.1;
+    }
 }
 
-fn activate_unlock_health_regen() {
-    //TODO
+fn activate_unlock_health_regen(health_regen: &mut HealthRegen) {
+    health_regen.timer = Timer::new(Duration::from_millis(2000), TimerMode::Repeating);
+    health_regen.amount = 1;
 }
 
-fn activate_faster_health_regen() {
-    //TODO
+fn activate_faster_health_regen(health_regen: &mut HealthRegen) {
+    let new_cooldown = health_regen.timer.duration().mul_f32(0.9);
+    health_regen.timer.set_duration(new_cooldown);
 }
 
-fn activate_retaliate() {
-    //TODO
+fn activate_retaliate(retaliate: &mut Retaliate) {
+    retaliate.0 = true;
 }
 
-fn activate_slower_enemies() {
-    //TODO
-}
-
-fn activate_invincible() {
-    //TODO
+fn activate_slower_enemies(speed_multiplier: &mut EnemySpeedMultiplier) {
+    let new_multiplier = 0.1_f32.max(speed_multiplier.0 * 0.9);
+    speed_multiplier.0 = new_multiplier;
 }

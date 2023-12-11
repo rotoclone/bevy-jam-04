@@ -10,7 +10,7 @@ bevy_wasm_window_resize = "0.2.1"
 bevy_asset_loader = { version = "0.18.0", features = ["progress_tracking"] }
 iyes_progress = "0.10.0"
 bevy_rapier2d = { version = "0.23.0", features = ["debug-render-2d"] }
-bevy_tweening = "0.9.0"
+bevy_tweening = { version = "0.9.0", features = ["bevy_sprite", "bevy_asset"] }
 rand = "0.8.5"
 smooth-bevy-cameras = "0.10.0"
 strum = { version = "0.25", features = ["derive"] }

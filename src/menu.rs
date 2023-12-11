@@ -37,7 +37,7 @@ fn menu_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .with_children(|parent| {
             parent.spawn(
                 TextBundle::from_section(
-                    "There's Too Many Of Them",
+                    "Last Stand",
                     TextStyle {
                         font: asset_server.load(TITLE_FONT),
                         font_size: 75.0,
@@ -82,7 +82,7 @@ fn menu_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                 .insert(StartButton)
                 .with_children(|parent| {
                     parent.spawn(TextBundle::from_section(
-                        "Start",
+                        "Begin",
                         TextStyle {
                             font: asset_server.load(MAIN_FONT),
                             font_size: 40.0,

@@ -91,7 +91,7 @@ fn game_over_setup(mut commands: Commands, level: Res<Level>, asset_server: Res<
                         .insert(RestartButton)
                         .with_children(|parent| {
                             parent.spawn(TextBundle::from_section(
-                                "Restart",
+                                "Again",
                                 TextStyle {
                                     font: asset_server.load(MAIN_FONT),
                                     font_size: 40.0,

@@ -19,7 +19,7 @@ use game::*;
 mod game_over;
 use game_over::*;
 
-const DEV_MODE: bool = true;
+const DEV_MODE: bool = false;
 
 const WINDOW_WIDTH: f32 = 1280.0;
 const WINDOW_HEIGHT: f32 = 720.0;
@@ -63,7 +63,7 @@ fn main() {
         .insert_resource(ZoomLevel(STARTING_ZOOM_LEVEL))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "There's Too Many Of Them".into(),
+                title: "Last Stand".into(),
                 resolution: WindowResolution::new(WINDOW_WIDTH, WINDOW_HEIGHT),
                 // Tells wasm to resize the window according to the available canvas
                 fit_canvas_to_parent: true,
