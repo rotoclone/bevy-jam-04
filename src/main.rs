@@ -1,4 +1,5 @@
 use bevy::{
+    asset::AssetMetaCheck,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     input::common_conditions::input_toggle_active,
     prelude::*,
@@ -57,7 +58,8 @@ pub struct DisabledButton;
 
 fn main() {
     let mut app = App::new();
-    app.insert_resource(ClearColor(Color::BLACK))
+    app.insert_resource(AssetMetaCheck::Never)
+        .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(Msaa::Sample4)
         .insert_resource(GlobalVolume::new(MASTER_VOLUME))
         .insert_resource(ZoomLevel(STARTING_ZOOM_LEVEL))

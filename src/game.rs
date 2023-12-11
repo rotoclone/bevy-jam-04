@@ -98,6 +98,7 @@ const HIT_SLOW_MO_TIME_SCALE: f32 = 0.5;
 const SWORD_Z: f32 = -1.0;
 const BACKGROUND_Z: f32 = -100.0;
 const EXPLOSION_Z: f32 = 1.0;
+const COOLDOWN_DISPLAY_Z: f32 = 10.0;
 
 const EXPLOSION_START_RADIUS: f32 = 6.0;
 const EXPLOSION_DURATION: Duration = Duration::from_millis(250);
@@ -147,6 +148,7 @@ const EXPLOSION_VOLUME: f32 = 0.5;
 const HIT_VOLUME: f32 = 0.25;
 const PLAYER_HIT_VOLUME: f32 = 0.6;
 const LEVEL_UP_VOLUME: f32 = 0.6;
+const SECONDARY_ACTION_READY_VOLUME: f32 = 0.4;
 
 pub struct GamePlugin;
 
@@ -207,7 +209,9 @@ impl Plugin for GamePlugin {
                     player_attack
                         .run_if(in_state(GameState::Game))
                         .run_if(input_pressed(ATTACK_INPUT)),
-                    update_secondary_action_cooldown.before(player_secondary_action),
+                    update_secondary_action_cooldown
+                        .before(player_secondary_action)
+                        .run_if(in_state(GameState::Game)),
                     player_secondary_action.run_if(input_pressed(SECONDARY_ACTION_INPUT)),
                     tween_completed,
                     move_camera.after(player_movement),
@@ -385,12 +389,14 @@ impl PerkType {
     fn choose_random_perk_types(
         amount: usize,
         existing_perks: &HashSet<PerkType>,
+        health: &Health,
     ) -> Vec<PerkType> {
         let has_grenade = existing_perks.contains(&PerkType::UnlockGrenade);
         let has_teleport = existing_perks.contains(&PerkType::UnlockTeleport);
         let has_teleport_explosion = existing_perks.contains(&PerkType::UnlockTeleportExplosion);
         let has_health_regen = existing_perks.contains(&PerkType::UnlockHealthRegen);
         let has_retaliate = existing_perks.contains(&PerkType::Retaliate);
+        let is_full_health = health.current_health == health.max_health;
         let valid_perks = PerkType::iter().filter(|perk_type| match perk_type {
             PerkType::UnlockGrenade => false, // !has_grenade,
             PerkType::LargerGrenadeExplosion => has_grenade,
@@ -402,6 +408,7 @@ impl PerkType {
             PerkType::UnlockHealthRegen => !has_health_regen,
             PerkType::FasterHealthRegen => has_health_regen,
             PerkType::Retaliate => !has_retaliate,
+            PerkType::Heal => !is_full_health,
             _ => true,
         });
 
@@ -474,6 +481,8 @@ pub struct AudioAssets {
     swing: Handle<AudioSource>,
     #[asset(path = "sounds/teleport.wav")]
     teleport: Handle<AudioSource>,
+    #[asset(path = "sounds/secondary_action_ready.wav")]
+    secondary_action_ready: Handle<AudioSource>,
 }
 
 #[derive(Resource)]
@@ -715,6 +724,9 @@ struct Explosion;
 
 #[derive(Component)]
 struct DeathAnimation;
+
+#[derive(Component)]
+struct SecondaryActionCooldownDisplay;
 
 #[derive(Event)]
 struct LevelUp {
@@ -1036,6 +1048,18 @@ fn game_setup(
             spawn_perk_chooser_button(1, parent, &asset_server);
             spawn_perk_chooser_button(2, parent, &asset_server);
         });
+
+    // secondary action cooldown display
+    commands
+        .spawn(MaterialMesh2dBundle {
+            mesh: meshes.add(shape::Box::new(10.0, 2.0, 1.0).into()).into(),
+            material: materials.add(ColorMaterial::from(Color::CYAN)),
+            transform: Transform::from_translation(Vec3::new(0., 0., 0.))
+                .with_scale(Vec3::new(0.0, 1.0, 1.0)),
+            ..default()
+        })
+        .insert(GameComponent)
+        .insert(SecondaryActionCooldownDisplay);
 }
 
 #[derive(Component)]
@@ -1375,7 +1399,15 @@ fn player_attack(
 }
 
 /// Updates secondary action cooldowns
-fn update_secondary_action_cooldown(mut query: Query<&mut SecondaryAction>, time: Res<Time>) {
+fn update_secondary_action_cooldown(
+    mut query: Query<&mut SecondaryAction>,
+    time: Res<Time>,
+    mut cooldown_display_query: Query<&mut Transform, With<SecondaryActionCooldownDisplay>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    window_query: Query<&Window>,
+    mut commands: Commands,
+    audio_assets: Res<AudioAssets>,
+) {
     for mut secondary_action in query.iter_mut() {
         let timer = match &mut secondary_action.0 {
             SecondaryActionType::None => continue,
@@ -1383,6 +1415,29 @@ fn update_secondary_action_cooldown(mut query: Query<&mut SecondaryAction>, time
             SecondaryActionType::Teleport { cooldown_timer, .. } => cooldown_timer,
         };
         timer.tick(time.delta());
+
+        if timer.just_finished() {
+            play_sound(
+                audio_assets.secondary_action_ready.clone(),
+                SECONDARY_ACTION_READY_VOLUME,
+                &mut commands,
+            );
+        }
+
+        let Some(cursor_world_position) = get_cursor_world_position(&camera_query, &window_query)
+        else {
+            continue;
+        };
+
+        for mut transform in cooldown_display_query.iter_mut() {
+            transform.translation = cursor_world_position.extend(COOLDOWN_DISPLAY_Z);
+            transform.translation.y -= 10.0;
+            if timer.finished() {
+                transform.scale.x = 0.0;
+            } else {
+                transform.scale.x = timer.percent_left();
+            }
+        }
     }
 }
 
@@ -1967,6 +2022,7 @@ fn level_up(
     mut perk_text_query: Query<(&mut Text, &PerkText)>,
     mut available_perks: ResMut<AvailablePerks>,
     mut perk_chooser_timers: ResMut<PerkChooserDelayTimers>,
+    health: Res<Health>,
     mut commands: Commands,
     audio_assets: Res<AudioAssets>,
 ) {
@@ -1987,7 +2043,8 @@ fn level_up(
 
         // display perk chooser
         for perks in player_query.iter_mut() {
-            available_perks.0 = PerkType::choose_random_perk_types(NUM_PERK_CHOICES, &perks.0);
+            available_perks.0 =
+                PerkType::choose_random_perk_types(NUM_PERK_CHOICES, &perks.0, &health);
             for (mut text, perk_text) in perk_text_query.iter_mut() {
                 let (name, desc) = available_perks.0[perk_text.0].get_name_and_description();
                 text.sections[0].value = name;
@@ -2277,7 +2334,7 @@ fn activate_shorter_grenade_cooldown(secondary_action: &mut SecondaryAction) {
 }
 
 fn activate_unlock_teleport(secondary_action: &mut SecondaryAction) {
-    let mut cooldown_timer = Timer::new(Duration::from_millis(5000), TimerMode::Once);
+    let mut cooldown_timer = Timer::new(Duration::from_millis(4000), TimerMode::Once);
     cooldown_timer.set_elapsed(cooldown_timer.duration());
 
     secondary_action.0 = SecondaryActionType::Teleport {
