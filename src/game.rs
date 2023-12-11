@@ -6,7 +6,7 @@ use std::{
 };
 
 use bevy::{
-    audio::{Volume, VolumeLevel},
+    audio::{PlaybackMode, Volume},
     ecs::query::WorldQuery,
     input::common_conditions::{input_just_pressed, input_pressed},
     sprite::MaterialMesh2dBundle,
@@ -140,6 +140,12 @@ const SECONDARY_ACTION_INPUT: KeyCode = KeyCode::Space;
 const PAUSE_INPUT: KeyCode = KeyCode::P;
 
 const BG_MUSIC_VOLUME: f32 = 0.5;
+const SWING_VOLUME: f32 = 0.4;
+const TELEPORT_VOLUME: f32 = 0.4;
+const EXPLOSION_VOLUME: f32 = 0.5;
+const HIT_VOLUME: f32 = 0.3;
+const PLAYER_HIT_VOLUME: f32 = 0.6;
+const LEVEL_UP_VOLUME: f32 = 0.6;
 
 pub struct GamePlugin;
 
@@ -197,7 +203,9 @@ impl Plugin for GamePlugin {
                 (
                     update_attack_cooldown.before(player_attack),
                     player_movement,
-                    player_attack.run_if(input_pressed(ATTACK_INPUT)),
+                    player_attack
+                        .run_if(in_state(GameState::Game))
+                        .run_if(input_pressed(ATTACK_INPUT)),
                     update_secondary_action_cooldown.before(player_secondary_action),
                     player_secondary_action.run_if(input_pressed(SECONDARY_ACTION_INPUT)),
                     tween_completed,
@@ -209,7 +217,9 @@ impl Plugin for GamePlugin {
                     collisions.run_if(in_state(GameState::Game)),
                     update_enemy_count_display,
                     slow_mo.run_if(in_state(GameState::Game)),
-                    level_up.after(update_level_display),
+                    level_up
+                        .after(update_level_display)
+                        .run_if(in_state(GameState::Game)),
                     toggle_pause.run_if(input_just_pressed(PAUSE_INPUT)),
                     show_perk_chooser_buttons,
                     choose_perk,
@@ -451,6 +461,18 @@ pub struct AudioAssets {
     #[asset(path = "sounds/background_music.ogg")]
     background_music: Handle<AudioSource>,
     */
+    #[asset(path = "sounds/explosion.wav")]
+    explosion: Handle<AudioSource>,
+    #[asset(path = "sounds/hit_3.wav")]
+    hit: Handle<AudioSource>,
+    #[asset(path = "sounds/player_hit.wav")]
+    player_hit: Handle<AudioSource>,
+    #[asset(path = "sounds/level_up.wav")]
+    level_up: Handle<AudioSource>,
+    #[asset(path = "sounds/swing.wav")]
+    swing: Handle<AudioSource>,
+    #[asset(path = "sounds/teleport.wav")]
+    teleport: Handle<AudioSource>,
 }
 
 #[derive(Resource)]
@@ -1293,11 +1315,13 @@ fn keep_player_in_bounds(mut player_query: Query<&mut Transform, With<Player>>) 
 
 /// Makes the player attack
 fn player_attack(
+    mut commands: Commands,
     mut player_query: Query<(&mut AttackCooldown, &mut Attacking, &mut Transform), With<Player>>,
     mut sword_pivot_query: Query<&mut Animator<Transform>, With<SwordPivot>>,
     mut sword_query: Query<&mut Sword>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     window_query: Query<&Window>,
+    audio_assets: Res<AudioAssets>,
 ) {
     let Some(cursor_world_position) = get_cursor_world_position(&camera_query, &window_query)
     else {
@@ -1330,6 +1354,8 @@ fn player_attack(
         }
 
         cooldown.0.reset();
+
+        play_sound(audio_assets.swing.clone(), SWING_VOLUME, &mut commands);
     }
 }
 
@@ -1353,6 +1379,7 @@ fn player_secondary_action(
     window_query: Query<&Window>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    audio_assets: Res<AudioAssets>,
 ) {
     for (mut secondary_action, mut transform) in player_query.iter_mut() {
         match &mut secondary_action.0 {
@@ -1393,6 +1420,7 @@ fn player_secondary_action(
                     cursor_world_position,
                     &mut meshes,
                     &mut materials,
+                    &audio_assets,
                 );
                 cooldown_timer.reset();
             }
@@ -1409,8 +1437,11 @@ fn teleport(
     target_position: Vec2,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ColorMaterial>,
+    audio_assets: &AudioAssets,
 ) {
     transform.translation = target_position.extend(transform.translation.z);
+    play_sound(audio_assets.teleport.clone(), TELEPORT_VOLUME, commands);
+
     if explodes {
         spawn_explosion(
             target_position,
@@ -1418,6 +1449,7 @@ fn teleport(
             commands,
             meshes,
             materials,
+            audio_assets,
         );
     }
 }
@@ -1429,6 +1461,7 @@ fn spawn_explosion(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ColorMaterial>,
+    audio_assets: &AudioAssets,
 ) {
     let end_scale = radius / EXPLOSION_START_RADIUS;
     let scale_animation = Tween::new(
@@ -1467,6 +1500,8 @@ fn spawn_explosion(
         .insert(Explosion)
         .insert(Animator::new(scale_animation))
         .insert(AssetAnimator::new(fade_animation));
+
+    play_sound(audio_assets.explosion.clone(), EXPLOSION_VOLUME, commands);
 }
 
 /// Moves the camera to follow the player
@@ -1673,6 +1708,8 @@ fn collisions(
     sword_query: Query<&Sword>,
     mut player_query: Query<(&Player, &Transform, &mut ExternalImpulse, &Retaliate)>,
     explosion_query: Query<&Explosion>,
+    mut commands: Commands,
+    audio_assets: Res<AudioAssets>,
 ) {
     for event in collision_events.read() {
         if let CollisionEvent::Started(a, b, _) = event {
@@ -1689,15 +1726,27 @@ fn collisions(
                     get_from_either::<Explosion, &Explosion>(*a, *b, &explosion_query)
                 {
                     // an enemy has hit an explosion
-                    entities_to_despawn.0.push(enemy_entity);
-                    level.current_xp += enemy.xp_reward;
+                    kill_enemy(
+                        enemy,
+                        enemy_entity,
+                        &mut entities_to_despawn,
+                        &mut level,
+                        &mut commands,
+                        &audio_assets,
+                    );
                 } else if let Some((sword, sword_entity)) =
                     get_from_either::<Sword, &Sword>(*a, *b, &sword_query)
                 {
                     // an enemy has hit the sword
                     if sword.active {
-                        entities_to_despawn.0.push(enemy_entity);
-                        level.current_xp += enemy.xp_reward;
+                        kill_enemy(
+                            enemy,
+                            enemy_entity,
+                            &mut entities_to_despawn,
+                            &mut level,
+                            &mut commands,
+                            &audio_assets,
+                        );
 
                         slow_mo_timer.target_time_scale = HIT_SLOW_MO_TIME_SCALE;
                         slow_mo_timer.timer.set_duration(HIT_SLOW_MO_TIME);
@@ -1712,11 +1761,22 @@ fn collisions(
                 ) {
                     // an enemy has hit the player
                     health.current_health = health.current_health.saturating_sub(enemy.damage);
+                    play_sound(
+                        audio_assets.player_hit.clone(),
+                        PLAYER_HIT_VOLUME,
+                        &mut commands,
+                    );
 
                     if let Ok(retaliate) = player_query.get_component::<Retaliate>(player_entity) {
                         if retaliate.0 {
-                            entities_to_despawn.0.push(enemy_entity);
-                            level.current_xp += enemy.xp_reward;
+                            kill_enemy(
+                                enemy,
+                                enemy_entity,
+                                &mut entities_to_despawn,
+                                &mut level,
+                                &mut commands,
+                                &audio_assets,
+                            );
                         }
                     }
 
@@ -1757,6 +1817,19 @@ fn get_from_either<'a, T: Component, Q: WorldQuery>(
     }
 
     None
+}
+
+fn kill_enemy(
+    enemy: &Enemy,
+    enemy_entity: Entity,
+    entities_to_despawn: &mut EntitiesToDespawn,
+    level: &mut Level,
+    commands: &mut Commands,
+    audio_assets: &AudioAssets,
+) {
+    entities_to_despawn.0.push(enemy_entity);
+    level.current_xp += enemy.xp_reward;
+    play_sound(audio_assets.hit.clone(), HIT_VOLUME, commands);
 }
 
 /// Despawns entities that need to be despawned
@@ -1831,8 +1904,17 @@ fn level_up(
     mut perk_text_query: Query<(&mut Text, &PerkText)>,
     mut available_perks: ResMut<AvailablePerks>,
     mut perk_chooser_timers: ResMut<PerkChooserDelayTimers>,
+    mut commands: Commands,
+    audio_assets: Res<AudioAssets>,
 ) {
     for _ in level_up_events.read() {
+        // play level up sound
+        play_sound(
+            audio_assets.level_up.clone(),
+            LEVEL_UP_VOLUME,
+            &mut commands,
+        );
+
         // zoom out a bit
         let new_zoom = MAX_ZOOM_LEVEL.min(zoom.0 * ZOOM_LEVEL_MULTIPLIER);
         zoom.0 = new_zoom;
@@ -2035,6 +2117,18 @@ fn get_cursor_world_position(
     };
 
     camera.viewport_to_world_2d(camera_transform, cursor_position)
+}
+
+/// Plays a sound
+fn play_sound(sound: Handle<AudioSource>, volume: f32, commands: &mut Commands) {
+    commands.spawn(AudioBundle {
+        source: sound,
+        settings: PlaybackSettings {
+            mode: PlaybackMode::Despawn,
+            volume: Volume::new_relative(volume),
+            ..default()
+        },
+    });
 }
 
 //
